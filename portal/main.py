@@ -85,10 +85,16 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     def render(request: Request, name: str, **ctx) -> HTMLResponse:
-        ctx.setdefault("user", current_user(request.session))
+        user = ctx.setdefault("user", current_user(request.session))
         ctx.setdefault("csrf_token", _csrf_token(request.session))
         ctx.setdefault("flashes", _pop_flashes(request.session))
         ctx.setdefault("portal_name", "Shoveler Auth")
+        ctx.setdefault(
+            "is_admin",
+            authz.is_registry_admin(
+                settings.registry_admin_subs, user.sub if user else None
+            ),
+        )
         return templates.TemplateResponse(request, name, ctx)
 
     # --- Browser routes --------------------------------------------------
@@ -153,6 +159,49 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         for row in rows:
             by_site[row["site"]].append(_client_view(row, settings.idle_days))
         return render(request, "dashboard.html", sites=sites, by_site=by_site)
+
+    @app.get("/admin", response_class=HTMLResponse)
+    def admin(request: Request):
+        user = current_user(request.session)
+        if not user:
+            return RedirectResponse("/", status_code=303)
+        if not authz.is_registry_admin(settings.registry_admin_subs, user.sub):
+            _flash(request.session, "Not authorized for the admin view.", "error")
+            return RedirectResponse("/dashboard", status_code=303)
+        conn = db.connect(settings.db_path)
+        try:
+            rows = db.list_all_clients(conn)
+        finally:
+            conn.close()
+        clients = [
+            dict(_client_view(row, settings.idle_days), owner_email=row["owner_email"])
+            for row in rows
+        ]
+        return render(request, "admin.html", clients=clients)
+
+    @app.post("/admin/{client_id}/disable")
+    def admin_disable(
+        request: Request, client_id: str, csrf_token: str = Form(...)
+    ):
+        user = current_user(request.session)
+        if not user:
+            return RedirectResponse("/", status_code=303)
+        if not authz.is_registry_admin(settings.registry_admin_subs, user.sub):
+            _flash(request.session, "Not authorized for the admin view.", "error")
+            return RedirectResponse("/dashboard", status_code=303)
+        if not _check_csrf(request.session, csrf_token):
+            _flash(request.session, "Invalid CSRF token.", "error")
+            return RedirectResponse("/admin", status_code=303)
+        conn = db.connect(settings.db_path)
+        try:
+            if db.get_client(conn, client_id) is None:
+                _flash(request.session, "No such client.", "error")
+                return RedirectResponse("/admin", status_code=303)
+            db.disable_client(conn, client_id, "revoked-by-admin")
+        finally:
+            conn.close()
+        _flash(request.session, f"Credential {client_id} disabled.", "info")
+        return RedirectResponse("/admin", status_code=303)
 
     @app.post("/credentials/create")
     def credentials_create(

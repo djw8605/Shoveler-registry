@@ -91,6 +91,14 @@ def list_clients_for_sites(
     return cur.fetchall()
 
 
+def list_all_clients(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every client across all sites (registry-admin view)."""
+    cur = conn.execute(
+        "SELECT * FROM clients ORDER BY site, last_used_at DESC, created_at DESC"
+    )
+    return cur.fetchall()
+
+
 def rotate_secret(conn: sqlite3.Connection, client_id: str, secret_hash: str) -> None:
     """Set a new secret hash and clear any disabled state (Recreate)."""
     conn.execute(

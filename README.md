@@ -70,6 +70,7 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `SCOPE_VALUE` | `my_rabbit_server.write:*/xrd-shoveled` | Permission written into the scope claim |
 | `IDLE_DAYS` | `30` | Idle-expiry threshold |
 | `ADMIN_CONTACT` | _generic_ | Shown on the not-authorized page |
+| `REGISTRY_ADMIN_SUBS` | _empty_ | Comma-separated CILogon subs of registry-wide admins |
 | `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW` | `30` / `60` | Per-`client_id` `/token` rate limit |
 
 ## CILogon client registration
@@ -101,6 +102,18 @@ The file is reloaded on **every request**, so edits take effect without a
 restart. There is no email-domain auto-grant — adding a person here is the
 central admin's only recurring action. A `sub` mapped to no site sees a
 friendly "not yet authorized; contact `${ADMIN_CONTACT}`" page.
+
+### Registry-wide admins
+
+Site-admins see only their own sites. A separate, smaller group of
+**registry-wide admins** — listed by CILogon `sub` in `REGISTRY_ADMIN_SUBS`
+(comma-separated, kept in deploy config rather than the editable allow-list) —
+get an **Admin** link to `GET /admin`, a read-only table of *every* credential
+across *all* sites (site, `client_id`, owner email, status, created,
+last_used). It makes idle/dead sites easy to scan. Admins may also disable any
+credential (`disabled_reason='revoked-by-admin'`); recovery is still
+self-service via the owner's Recreate. Leave `REGISTRY_ADMIN_SUBS` empty to
+disable the admin view entirely.
 
 ## Local development
 

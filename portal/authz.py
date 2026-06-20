@@ -53,3 +53,8 @@ def sites_for_sub(path: str, sub: Optional[str]) -> list[str]:
 
 def may_manage_site(path: str, sub: Optional[str], site: str) -> bool:
     return site in sites_for_sub(path, sub)
+
+
+def is_registry_admin(admin_subs, sub: Optional[str]) -> bool:
+    """Registry-wide admins are listed by sub in deploy config (REGISTRY_ADMIN_SUBS)."""
+    return bool(sub) and sub in (admin_subs or ())

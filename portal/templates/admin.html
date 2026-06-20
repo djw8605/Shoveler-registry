@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block flash %}{{ ui.flash(flashes) }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-slate-900">All credentials</h1>
+    <p class="mt-1 text-sm text-slate-500">
+      Registry-wide view across every site. Spot idle or dead sites by scanning
+      “Last used” and the status badge. You may disable any credential.
+    </p>
+  </div>
+
+  {% call ui.card() %}
+    {% if clients %}
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <thead>
+            <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
+              <th class="py-2 pr-4">Site</th>
+              <th class="py-2 pr-4">client_id</th>
+              <th class="py-2 pr-4">Owner</th>
+              <th class="py-2 pr-4">Status</th>
+              <th class="py-2 pr-4">Created</th>
+              <th class="py-2 pr-4">Last used</th>
+              <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            {% for c in clients %}
+              <tr>
+                <td class="py-3 pr-4 font-medium text-slate-900">{{ c.site }}</td>
+                <td class="py-3 pr-4 font-mono text-xs text-slate-900">{{ c.client_id }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ c.owner_email or "—" }}</td>
+                <td class="py-3 pr-4">
+                  {{ ui.badge(c.status) }}
+                  {% if c.disabled_reason %}
+                    <span class="ml-1 text-xs text-slate-400">({{ c.disabled_reason }})</span>
+                  {% endif %}
+                </td>
+                <td class="py-3 pr-4 text-slate-600">{{ c.created_at[:10] }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ c.last_used_at[:16] if c.last_used_at else "—" }}</td>
+                <td class="py-3 pr-4">
+                  <div class="flex justify-end">
+                    {% if c.status != "disabled" %}
+                    <form method="post" action="/admin/{{ c.client_id }}/disable"
+                          onsubmit="return confirm('Disable {{ c.client_id }} ({{ c.site }})? The shoveler will stop getting tokens.');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                      {{ ui.button("Disable", "submit", "danger") }}
+                    </form>
+                    {% endif %}
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-sm text-slate-500">No credentials have been created yet.</p>
+    {% endif %}
+  {% endcall %}
+</div>
+{% endblock %}

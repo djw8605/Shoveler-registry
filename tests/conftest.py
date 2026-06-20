@@ -43,6 +43,8 @@ def settings(tmp_path, site_admins_file) -> Settings:
         admin_contact="admin@example.org",
         token_rate_limit=1000,
         token_rate_window=60,
+        # Carol is a registry-wide admin but manages no individual site.
+        registry_admin_subs=("http://cilogon.org/serverA/users/30000",),
     )
 
 

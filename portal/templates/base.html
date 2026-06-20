@@ -13,6 +13,9 @@
       <a href="/" class="text-sm font-semibold tracking-tight text-slate-900">{{ portal_name }}</a>
       {% if user %}
         <div class="flex items-center gap-4 text-sm">
+          {% if is_admin %}
+            <a href="/admin" class="font-medium text-indigo-600 hover:text-indigo-500">Admin</a>
+          {% endif %}
           <span class="text-slate-500">{{ user.email or user.sub }}</span>
           <a href="/auth/logout" class="font-medium text-indigo-600 hover:text-indigo-500">Log out</a>
         </div>

@@ -48,6 +48,10 @@ class Settings:
     token_rate_limit: int
     token_rate_window: int
 
+    # CILogon subs of registry-wide admins (see all sites; may disable any
+    # client). Kept in deploy config rather than the editable site-admins file.
+    registry_admin_subs: tuple[str, ...]
+
     @property
     def redirect_uri(self) -> str:
         return self.portal_base_url.rstrip("/") + "/auth/callback"
@@ -78,4 +82,9 @@ def get_settings() -> Settings:
         admin_contact=os.environ.get("ADMIN_CONTACT", "your central admin"),
         token_rate_limit=int(os.environ.get("TOKEN_RATE_LIMIT", "30")),
         token_rate_window=int(os.environ.get("TOKEN_RATE_WINDOW", "60")),
+        registry_admin_subs=tuple(
+            s.strip()
+            for s in os.environ.get("REGISTRY_ADMIN_SUBS", "").split(",")
+            if s.strip()
+        ),
     )
