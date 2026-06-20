@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block flash %}{{ ui.flash(flashes) }}{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-md">
+  {% call ui.card() %}
+    <div class="space-y-5 text-center">
+      <h1 class="text-lg font-semibold text-slate-900">Shoveler credential portal</h1>
+      <p class="text-sm leading-6 text-slate-600">
+        Self-provision <code class="rounded bg-slate-100 px-1 py-0.5 text-xs">client_id</code>
+        /<code class="rounded bg-slate-100 px-1 py-0.5 text-xs">client_secret</code>
+        pairs for the xrootd-monitoring-shoveler. Sign in to manage credentials for
+        your site.
+      </p>
+      <a href="/auth/login"
+         class="inline-flex w-full items-center justify-center rounded-md bg-indigo-600 px-3.5 py-2.5 text-sm font-medium text-white shadow-sm transition-colors hover:bg-indigo-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2">
+        Log in with CILogon
+      </a>
+    </div>
+  {% endcall %}
+</div>
+{% endblock %}

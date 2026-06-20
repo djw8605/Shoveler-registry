@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shoveler-auth-portal
+  labels:
+    app: shoveler-auth-portal
+spec:
+  replicas: 1 # SQLite + on-disk keys: keep a single writer. Scale via a shared RWX volume only if you understand the implications.
+  selector:
+    matchLabels:
+      app: shoveler-auth-portal
+  template:
+    metadata:
+      labels:
+        app: shoveler-auth-portal
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: portal
+          image: ghcr.io/djw8605/shoveler-auth-portal:latest
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: shoveler-auth-portal
+          env:
+            - name: DB_PATH
+              value: /data/portal.db
+            - name: SIGNING_KEY_DIR
+              value: /data/keys
+            - name: SITE_ADMINS_FILE
+              value: /config/site-admins.yaml
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: site-admins
+              mountPath: /config
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+      volumes:
+        # Persists the SQLite DB and signing keys across restarts.
+        - name: data
+          persistentVolumeClaim:
+            claimName: shoveler-auth-portal-data
+        # The allow-list, managed by the central admin (e.g. a ConfigMap).
+        - name: site-admins
+          configMap:
+            name: shoveler-auth-site-admins
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shoveler-auth-portal-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shoveler-auth-portal
+  labels:
+    app: shoveler-auth-portal
+spec:
+  selector:
+    app: shoveler-auth-portal
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

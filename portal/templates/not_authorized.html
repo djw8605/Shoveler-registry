@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block flash %}{{ ui.flash(flashes) }}{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-md">
+  {% call ui.card() %}
+    <div class="space-y-4 text-center">
+      <h1 class="text-lg font-semibold text-slate-900">Not yet authorized</h1>
+      <p class="text-sm leading-6 text-slate-600">
+        Your account isn't mapped to any site yet. To manage shoveler credentials,
+        ask the central admin to add you to the site allow-list.
+      </p>
+      <p class="text-sm text-slate-600">
+        Contact: <span class="font-medium text-slate-900">{{ admin_contact }}</span>
+      </p>
+      <p class="text-xs text-slate-400">
+        Signed in as {{ user.email or user.sub }}.
+      </p>
+    </div>
+  {% endcall %}
+</div>
+{% endblock %}
