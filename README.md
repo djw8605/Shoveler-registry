@@ -143,9 +143,11 @@ Run the tests with `pytest`.
 `POST /token` accepts a form-encoded `client_credentials` grant (or HTTP Basic
 per RFC 6749). On success it returns
 `{"access_token", "token_type":"Bearer", "expires_in"}` and updates the
-credential's `last_used_at`. Any failure (unknown id, disabled, or wrong
-secret) returns a uniform `401 {"error":"invalid_client"}`; the secret check is
-constant-time.
+credential's `last_used_at`. Any authentication failure (unknown id, disabled,
+or wrong secret) returns a uniform `401 {"error":"invalid_client"}` — the secret
+check is constant-time and never reveals which of id/secret was wrong. Requests
+that exceed the per-`client_id` rate limit instead get `429` with a `Retry-After`
+header (a throttling signal, distinct from the auth-failure response).
 
 The minted RS256 JWT (header carries `kid`) has claims:
 

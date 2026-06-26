@@ -36,7 +36,7 @@ def find_and_disable_idle(
     for row in cur.fetchall():
         ref = row["last_used_at"] or row["created_at"]
         try:
-            ref_dt = datetime.fromisoformat(ref)
+            ref_dt = db.parse_ts(ref)
         except (ValueError, TypeError):
             log.warning("Skipping %s: unparseable timestamp %r", row["client_id"], ref)
             continue

@@ -31,6 +31,19 @@ def utcnow_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def parse_ts(value: str) -> datetime:
+    """Parse an ISO8601 timestamp, assuming UTC if the value is naive.
+
+    All timestamps this service writes are tz-aware (see utcnow_iso), but a
+    hand-edited or migrated row could be naive; normalising here keeps later
+    aware/naive comparisons from raising TypeError.
+    """
+    dt = datetime.fromisoformat(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 def connect(db_path: str) -> sqlite3.Connection:
     """Open a connection with WAL enabled and dict-like rows."""
     parent = os.path.dirname(os.path.abspath(db_path))

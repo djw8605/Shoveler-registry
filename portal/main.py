@@ -341,12 +341,18 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         base = settings.token_issuer.rstrip("/")
         return JSONResponse(
             {
+                # Minimal metadata so RabbitMQ can discover the JWKS from the
+                # issuer. This service is a client-credentials token issuer, not
+                # a full OIDC provider (no authorize endpoint, no ID tokens), so
+                # we advertise only what applies.
                 "issuer": settings.token_issuer,
                 "jwks_uri": base + "/.well-known/jwks.json",
                 "token_endpoint": base + "/token",
                 "grant_types_supported": ["client_credentials"],
-                "id_token_signing_alg_values_supported": ["RS256"],
-                "response_types_supported": ["token"],
+                "token_endpoint_auth_methods_supported": [
+                    "client_secret_basic",
+                    "client_secret_post",
+                ],
             }
         )
 
@@ -379,7 +385,7 @@ def _client_view(row, idle_days: int) -> dict:
     else:
         ref = row["last_used_at"] or row["created_at"]
         try:
-            ref_dt = datetime.fromisoformat(ref)
+            ref_dt = db.parse_ts(ref)
             age_days = (datetime.now(timezone.utc) - ref_dt).total_seconds() / 86400
             status = "idle" if age_days >= idle_days else "active"
         except (ValueError, TypeError):
@@ -398,7 +404,7 @@ def _parse_basic_auth(header: Optional[str]) -> Optional[tuple[str, str]]:
     if not header or not header.lower().startswith("basic "):
         return None
     try:
-        raw = base64.b64decode(header.split(" ", 1)[1]).decode("utf-8")
+        raw = base64.b64decode(header.split(" ", 1)[1], validate=True).decode("utf-8")
     except (binascii.Error, UnicodeDecodeError, IndexError):
         return None
     if ":" not in raw:

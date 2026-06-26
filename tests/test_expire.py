@@ -60,6 +60,27 @@ def test_idle_calc_disables_correct_rows(settings):
         conn.close()
 
 
+def test_naive_timestamp_is_treated_as_utc(settings):
+    # A hand-edited/migrated row may have a naive timestamp (no tz offset).
+    # The job must treat it as UTC and not crash on aware/naive comparison.
+    naive_old = (datetime.now(timezone.utc) - timedelta(days=40)).replace(
+        tzinfo=None
+    ).isoformat()
+    naive_new = (datetime.now(timezone.utc) - timedelta(days=1)).replace(
+        tzinfo=None
+    ).isoformat()
+    _insert(settings, "shoveler-naive-old", last_used=naive_old)
+    _insert(settings, "shoveler-naive-new", last_used=naive_new)
+
+    conn = db.connect(settings.db_path)
+    try:
+        disabled = expire.find_and_disable_idle(conn, settings.idle_days)
+        assert "shoveler-naive-old" in disabled
+        assert "shoveler-naive-new" not in disabled
+    finally:
+        conn.close()
+
+
 def test_already_disabled_rows_untouched(settings):
     _insert(settings, "shoveler-revoked", last_used=_iso(1))
     conn = db.connect(settings.db_path)
