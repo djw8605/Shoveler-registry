@@ -1,0 +1,17 @@
+# Site-management allow-list.
+#
+# Maps CILogon identities to the sites they may manage. Only the `sub` claim is
+# used for authorization (it is the stable, unique identifier CILogon
+# guarantees); `email` is for human readability/audit only.
+#
+# The portal reloads this file on every request, so edits take effect WITHOUT a
+# restart. Adding a person here is the central admin's only recurring action.
+# There is NO domain-based auto-grant: each person needs an explicit entry.
+
+nebraska:
+  - sub: "http://cilogon.org/serverA/users/12345"
+    email: "derek@unl.edu"
+
+wisconsin:
+  - sub: "http://cilogon.org/serverB/users/67890"
+    email: "someone@wisc.edu"

@@ -1,0 +1,20 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Source of truth for styling. The compiled artifact lives at
+   portal/static/css/app.css and is the only stylesheet the app links. */
+
+@layer base {
+  html {
+    font-feature-settings: "cv11", "ss01";
+  }
+}
+
+@layer components {
+  /* Repeated patterns can live here if a class string appears in many places.
+     Most button/card/badge styling is centralised in templates/macros.html. */
+  .focusable {
+    @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2;
+  }
+}

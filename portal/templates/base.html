@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en" class="h-full bg-slate-50">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="referrer" content="same-origin" />
+  <title>{% block title %}{{ portal_name }}{% endblock %}</title>
+  <link rel="stylesheet" href="/static/css/app.css" />
+</head>
+<body class="h-full text-slate-800 antialiased">
+  <header class="border-b border-slate-200 bg-white">
+    <div class="mx-auto flex max-w-5xl items-center justify-between px-4 py-3">
+      <a href="/" class="text-sm font-semibold tracking-tight text-slate-900">{{ portal_name }}</a>
+      {% if user %}
+        <div class="flex items-center gap-4 text-sm">
+          {% if is_admin %}
+            <a href="/admin" class="font-medium text-indigo-600 hover:text-indigo-500">Admin</a>
+          {% endif %}
+          <span class="text-slate-500">{{ user.email or user.sub }}</span>
+          <a href="/auth/logout" class="font-medium text-indigo-600 hover:text-indigo-500">Log out</a>
+        </div>
+      {% endif %}
+    </div>
+  </header>
+
+  <main class="mx-auto max-w-5xl px-4 py-8">
+    {% block flash %}{% endblock %}
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>

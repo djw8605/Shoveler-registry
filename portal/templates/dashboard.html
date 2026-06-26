@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block flash %}{{ ui.flash(flashes) }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <div>
+    <h1 class="text-xl font-semibold tracking-tight text-slate-900">Your sites</h1>
+    <p class="mt-1 text-sm text-slate-500">
+      Credentials for the shoveler. Secrets are shown only once at creation; we
+      store only a hash and cannot display them again.
+    </p>
+  </div>
+
+  {% for site in sites %}
+    {% call ui.card(title=site) %}
+      <form method="post" action="/credentials/create" class="mb-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+        <input type="hidden" name="site" value="{{ site }}" />
+        {{ ui.button("Create credential", "submit", "primary") }}
+      </form>
+
+      {% set clients = by_site[site] %}
+      {% if clients %}
+        <div class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-slate-200 text-sm">
+            <thead>
+              <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
+                <th class="py-2 pr-4">client_id</th>
+                <th class="py-2 pr-4">Status</th>
+                <th class="py-2 pr-4">Created</th>
+                <th class="py-2 pr-4">Last used</th>
+                <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100">
+              {% for c in clients %}
+                <tr>
+                  <td class="py-3 pr-4 font-mono text-xs text-slate-900">{{ c.client_id }}</td>
+                  <td class="py-3 pr-4">{{ ui.badge(c.status) }}</td>
+                  <td class="py-3 pr-4 text-slate-600">{{ c.created_at[:10] }}</td>
+                  <td class="py-3 pr-4 text-slate-600">{{ c.last_used_at[:16] if c.last_used_at else "—" }}</td>
+                  <td class="py-3 pr-4">
+                    <div class="flex justify-end gap-2">
+                      <form method="post" action="/credentials/{{ c.client_id }}/recreate"
+                            onsubmit="return confirm('Recreate {{ c.client_id }}? The current secret stops working immediately.');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                        {{ ui.button("Recreate", "submit", "secondary") }}
+                      </form>
+                      {% if c.status != "disabled" %}
+                      <form method="post" action="/credentials/{{ c.client_id }}/disable"
+                            onsubmit="return confirm('Disable {{ c.client_id }}? The shoveler will stop getting tokens.');">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                        {{ ui.button("Disable", "submit", "danger") }}
+                      </form>
+                      {% endif %}
+                    </div>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% else %}
+        <p class="text-sm text-slate-500">No credentials yet for this site.</p>
+      {% endif %}
+    {% endcall %}
+  {% endfor %}
+</div>
+{% endblock %}

@@ -1,0 +1,54 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: shoveler-auth-idle-expiry
+  labels:
+    app: shoveler-auth-portal
+spec:
+  # Run nightly. Disables credentials idle for >= IDLE_DAYS (default 30).
+  schedule: "17 3 * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+          containers:
+            - name: expire
+              image: ghcr.io/djw8605/shoveler-auth-portal:latest
+              command: ["python", "-m", "portal.expire"]
+              envFrom:
+                - secretRef:
+                    name: shoveler-auth-portal
+              env:
+                - name: DB_PATH
+                  value: /data/portal.db
+                - name: SIGNING_KEY_DIR
+                  value: /data/keys
+                - name: SITE_ADMINS_FILE
+                  value: /config/site-admins.yaml
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                - name: site-admins
+                  mountPath: /config
+                  readOnly: true
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+          volumes:
+            # Must be the SAME volume the Deployment writes to (the shared DB).
+            - name: data
+              persistentVolumeClaim:
+                claimName: shoveler-auth-portal-data
+            - name: site-admins
+              configMap:
+                name: shoveler-auth-site-admins
