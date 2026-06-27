@@ -33,7 +33,6 @@ class Settings:
     # --- Storage ---
     db_path: str
     signing_key_dir: str
-    site_admins_file: str
 
     # --- Issued-token claims (must match RabbitMQ's expectations) ---
     token_issuer: str
@@ -48,9 +47,15 @@ class Settings:
     token_rate_limit: int
     token_rate_window: int
 
-    # CILogon subs of registry-wide admins (see all sites; may disable any
-    # client). Kept in deploy config rather than the editable site-admins file.
-    registry_admin_subs: tuple[str, ...]
+    # --- COmanage group-based authorization ---
+    # Site authorization comes from the CILogon ``isMemberOf`` claim (the
+    # COmanage groups the user belongs to). A group named
+    # ``<comanage_group_prefix><site>`` grants management of ``<site>``; the
+    # site name is the part of the group name after the prefix.
+    comanage_group_prefix: str
+    # Membership in this COmanage group grants registry-wide admin (sees all
+    # sites at /admin, may disable any client). Empty disables the admin view.
+    registry_admin_group: str
 
     @property
     def redirect_uri(self) -> str:
@@ -70,7 +75,6 @@ def get_settings() -> Settings:
         session_secret=_require("SESSION_SECRET"),
         db_path=os.environ.get("DB_PATH", "./data/portal.db"),
         signing_key_dir=os.environ.get("SIGNING_KEY_DIR", "./data/keys"),
-        site_admins_file=os.environ.get("SITE_ADMINS_FILE", "./site-admins.yaml"),
         token_issuer=_require("TOKEN_ISSUER"),
         resource_server_id=_require("RESOURCE_SERVER_ID"),
         token_ttl_seconds=int(os.environ.get("TOKEN_TTL_SECONDS", "14400")),
@@ -82,9 +86,6 @@ def get_settings() -> Settings:
         admin_contact=os.environ.get("ADMIN_CONTACT", "your central admin"),
         token_rate_limit=int(os.environ.get("TOKEN_RATE_LIMIT", "30")),
         token_rate_window=int(os.environ.get("TOKEN_RATE_WINDOW", "60")),
-        registry_admin_subs=tuple(
-            s.strip()
-            for s in os.environ.get("REGISTRY_ADMIN_SUBS", "").split(",")
-            if s.strip()
-        ),
+        comanage_group_prefix=os.environ.get("COMANAGE_GROUP_PREFIX", "shoveler-"),
+        registry_admin_group=os.environ.get("REGISTRY_ADMIN_GROUP", "").strip(),
     )

@@ -35,15 +35,15 @@ portal/
   db.py         sqlite schema + queries (WAL)
   keys.py       key gen/load, JWKS, rotation CLI
   tokens.py     /token logic, claim building, argon2, rate limiting
-  authz.py      site-admins allow-list
-  auth.py       CILogon OIDC relying-party flow + session
+  authz.py      COmanage group-based site authorization
+  auth.py       CILogon OIDC relying-party flow + session (captures isMemberOf)
   main.py       FastAPI app, routes, middleware, CSRF
   expire.py     idle-expiry subcommand
   templates/    base, macros, login, dashboard, secret_once, not_authorized
   static/css/   compiled app.css (build artifact)
 assets/app.css  Tailwind source (source of truth)
 tailwind.config.js, package.json
-site-admins.example.yaml, .env.example
+.env.example
 Dockerfile      multi-stage (node build → python runtime), non-root
 k8s/            deployment, cronjob, secret example
 tests/
@@ -62,7 +62,7 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `SESSION_SECRET` | _required_ | Signs the session cookie |
 | `DB_PATH` | `./data/portal.db` | SQLite file |
 | `SIGNING_KEY_DIR` | `./data/keys` | Signing keys + `manifest.json` |
-| `SITE_ADMINS_FILE` | `./site-admins.yaml` | Allow-list (reloaded each request) |
+| `COMANAGE_GROUP_PREFIX` | `shoveler-` | Group-name prefix; site = group name after the prefix |
 | `TOKEN_ISSUER` | _required_ | JWT `iss` (= RabbitMQ `auth_oauth2.issuer`) |
 | `RESOURCE_SERVER_ID` | _required_ | JWT `aud` (= RabbitMQ `auth_oauth2.resource_server_id`), exact |
 | `TOKEN_TTL_SECONDS` | `14400` | JWT lifetime (4h) |
@@ -70,7 +70,7 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `SCOPE_VALUE` | `my_rabbit_server.write:*/xrd-shoveled` | Permission written into the scope claim |
 | `IDLE_DAYS` | `30` | Idle-expiry threshold |
 | `ADMIN_CONTACT` | _generic_ | Shown on the not-authorized page |
-| `REGISTRY_ADMIN_SUBS` | _empty_ | Comma-separated CILogon subs of registry-wide admins |
+| `REGISTRY_ADMIN_GROUP` | _empty_ | COmanage group whose members are registry-wide admins |
 | `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW` | `30` / `60` | Per-`client_id` `/token` rate limit |
 
 ## CILogon client registration
@@ -83,37 +83,44 @@ Register a **confidential** OIDC client at <https://cilogon.org/oauth2/register>
 - **Grant:** authorization code (the portal adds PKCE + `state` + `nonce`)
 
 CILogon issues the `client_id`/`client_secret`; set them as
-`CILOGON_CLIENT_ID` / `CILOGON_CLIENT_SECRET`. Only the `sub` claim is used as
-the stable identity; the ID token is fully validated (signature via CILogon's
-JWKS, plus `iss`/`aud`/`exp`/`nonce`).
+`CILOGON_CLIENT_ID` / `CILOGON_CLIENT_SECRET`. The `sub` claim is the stable
+identity; the `isMemberOf` claim carries the user's COmanage group memberships
+(used for authorization, below). The ID token is fully validated (signature via
+CILogon's JWKS, plus `iss`/`aud`/`exp`/`nonce`).
 
-## Authorization (site-admins allow-list)
+> The `org.cilogon.userinfo` scope (already requested) is what releases
+> `isMemberOf`. If your CILogon/COmanage deployment only returns it from the
+> userinfo endpoint rather than in the ID token, the portal fetches it from
+> there automatically.
 
-Who may manage which site is controlled by [`site-admins.yaml`](./site-admins.example.yaml),
-keyed by CILogon `sub`:
+## Authorization (COmanage groups)
 
-```yaml
-nebraska:
-  - sub: "http://cilogon.org/serverA/users/12345"
-    email: "derek@unl.edu"
-```
+Who may manage which site is driven by the user's **COmanage group
+memberships**, delivered by CILogon in the `isMemberOf` claim. There is no
+local allow-list file to maintain: access follows directly from the groups the
+central admin manages in COmanage.
 
-The file is reloaded on **every request**, so edits take effect without a
-restart. There is no email-domain auto-grant — adding a person here is the
-central admin's only recurring action. A `sub` mapped to no site sees a
-friendly "not yet authorized; contact `${ADMIN_CONTACT}`" page.
+**Convention:** a group named `<COMANAGE_GROUP_PREFIX><site>` grants management
+of `<site>`. With the default `shoveler-` prefix, membership in the COmanage
+group `shoveler-nebraska` lets a user manage site `nebraska`. The site name is
+the part of the group name after the prefix; groups that don't start with the
+prefix (e.g. COmanage's built-in `CO:members:active`) are ignored.
+
+Group memberships are captured into the session **at login**, so changes in
+COmanage take effect on the user's next login rather than instantly. A user
+who is in no site group sees a friendly "not yet authorized; contact
+`${ADMIN_CONTACT}`" page.
 
 ### Registry-wide admins
 
-Site-admins see only their own sites. A separate, smaller group of
-**registry-wide admins** — listed by CILogon `sub` in `REGISTRY_ADMIN_SUBS`
-(comma-separated, kept in deploy config rather than the editable allow-list) —
-get an **Admin** link to `GET /admin`, a read-only table of *every* credential
-across *all* sites (site, `client_id`, owner email, status, created,
-last_used). It makes idle/dead sites easy to scan. Admins may also disable any
-credential (`disabled_reason='revoked-by-admin'`); recovery is still
-self-service via the owner's Recreate. Leave `REGISTRY_ADMIN_SUBS` empty to
-disable the admin view entirely.
+Site operators see only their own sites. Members of the COmanage group named in
+`REGISTRY_ADMIN_GROUP` are **registry-wide admins**: they get an **Admin** link
+to `GET /admin`, a read-only table of *every* credential across *all* sites
+(site, `client_id`, owner email, status, created, last_used). It makes
+idle/dead sites easy to scan. Admins may also disable any credential
+(`disabled_reason='revoked-by-admin'`); recovery is still self-service via the
+owner's Recreate. Leave `REGISTRY_ADMIN_GROUP` empty to disable the admin view
+entirely.
 
 ## Local development
 
@@ -128,8 +135,7 @@ npm run build:css          # one-shot, minified
 npm run watch:css          # rebuild on change (run alongside uvicorn)
 
 # 3. Config
-cp .env.example .env       # fill in CILOGON_*, SESSION_SECRET, etc.
-cp site-admins.example.yaml site-admins.yaml
+cp .env.example .env       # fill in CILOGON_*, SESSION_SECRET, COMANAGE_GROUP_PREFIX, etc.
 set -a; . ./.env; set +a   # export the vars into your shell
 
 # 4. Run (factory mode — create_app() reads settings from the env)

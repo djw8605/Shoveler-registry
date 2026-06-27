@@ -11,11 +11,12 @@ from jwt.algorithms import RSAAlgorithm
 from portal.auth import UserInfo
 
 ALICE = "http://cilogon.org/serverA/users/11111"  # nebraska in conftest
+ALICE_GROUPS = ("shoveler-nebraska",)  # COmanage group granting site "nebraska"
 
 
-def _login(monkeypatch, sub=ALICE, email="alice@unl.edu"):
+def _login(monkeypatch, sub=ALICE, email="alice@unl.edu", groups=ALICE_GROUPS):
     monkeypatch.setattr(
-        main_mod, "current_user", lambda session: UserInfo(sub, email, "Alice")
+        main_mod, "current_user", lambda session: UserInfo(sub, email, "Alice", groups)
     )
 
 

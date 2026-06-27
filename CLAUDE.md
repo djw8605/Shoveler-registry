@@ -22,8 +22,8 @@ ORM, a JS framework, the Tailwind Play CDN) — the stack is fixed (see README).
 | `db.py` | stdlib `sqlite3` (WAL), schema init, and all SQL. No ORM. One connection per operation. |
 | `keys.py` | RSA key gen/load, JWKS, `KeyStore`, manifest-based rotation. CLI: `python -m portal.keys generate|list`. |
 | `tokens.py` | `/token` logic (`issue_token`), claim building, argon2 hashing/verify, in-process `RateLimiter`. |
-| `authz.py` | `site-admins.yaml` allow-list (reloaded each request) + `is_registry_admin`. |
-| `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, session helpers. |
+| `authz.py` | COmanage group-based authz: `sites_for_groups`/`may_manage_site` (group `<prefix><site>` → site) + `is_registry_admin`. No file. |
+| `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
 | `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()` helper, machine endpoints. |
 | `expire.py` | Idle-expiry subcommand: `python -m portal.expire`. |
 | `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `secret_once`, `not_authorized`, `admin`. |
@@ -67,9 +67,12 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - **Browser POSTs are CSRF-protected.** Every form includes the per-session
   `csrf_token`; handlers call `_check_csrf`. Destructive actions also confirm
   via a JS `confirm()` in the template. New POST routes must do the same.
-- **Authorization:** site-admins see only their sites
-  (`authz.sites_for_sub`); registry admins (`REGISTRY_ADMIN_SUBS`) see all via
-  `/admin`. No email-domain auto-grant — explicit allow-list/sub entries only.
+- **Authorization:** driven by COmanage group membership from CILogon's
+  `isMemberOf` claim (captured into the session at login). A group
+  `<COMANAGE_GROUP_PREFIX><site>` grants management of `<site>`
+  (`authz.sites_for_groups`); members of `REGISTRY_ADMIN_GROUP` see all via
+  `/admin`. No allow-list file, no email-domain auto-grant — group membership
+  is the only grant. Group changes take effect on next login, not instantly.
 - **Sessions:** cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` whenever
   `PORTAL_BASE_URL` is https.
 - **Config:** add new settings in `config.py` (parse env + default there), then
@@ -90,10 +93,11 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 ## Testing notes
 
 - `tests/conftest.py` builds an isolated `Settings` per test (tmp DB, tmp key
-  dir, a sample `site-admins.yaml`) and a `TestClient` with
+  dir, `comanage_group_prefix`/`registry_admin_group`) and a `TestClient` with
   `base_url="https://testserver"` so the **Secure** session cookie is sent back.
 - For routes needing a logged-in user, monkeypatch `portal.main.current_user`
-  (it's resolved as a module global at call time). CSRF token is scraped from a
+  to return a `UserInfo` with the right `groups` (e.g. `("shoveler-nebraska",)`);
+  it's resolved as a module global at call time. CSRF token is scraped from a
   prior `GET` of the page.
 - Coverage lives in `test_token`, `test_jwks`, `test_authz`, `test_expire`,
   `test_flow` (browser lifecycle), `test_admin`. Add to the matching file.
@@ -118,6 +122,6 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 ## Repo hygiene
 
 - Default branch is `main`. Don't commit `data/`, `*.pem`, `manifest.json`,
-  `.env`, `site-admins.yaml`, `node_modules/`, or the compiled CSS.
+  `.env`, `node_modules/`, or the compiled CSS.
 - Keep README, `.env.example`, and `k8s/secret.example.yaml` in sync when env
   vars change.
