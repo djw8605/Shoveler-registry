@@ -18,7 +18,6 @@ data/
 *.db
 *.db-wal
 *.db-shm
-site-admins.yaml
 
 # Signing keys (defense in depth; keys live under data/ by default)
 *.pem

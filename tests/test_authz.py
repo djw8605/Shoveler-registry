@@ -1,4 +1,4 @@
-"""Allow-list enforcement and per-user site visibility on the dashboard."""
+"""Group-based authorization and per-user site visibility on the dashboard."""
 
 from __future__ import annotations
 
@@ -8,18 +8,36 @@ from portal.auth import UserInfo
 
 ALICE = "http://cilogon.org/serverA/users/11111"  # nebraska
 BOB = "http://cilogon.org/serverA/users/22222"     # wisconsin
-NOBODY = "http://cilogon.org/serverA/users/99999"
+
+# COmanage group memberships (the CILogon ``isMemberOf`` claim).
+ALICE_GROUPS = ("CO:members:active", "shoveler-nebraska")
+BOB_GROUPS = ("shoveler-wisconsin",)
+NOBODY_GROUPS = ("CO:members:active",)
+
+PREFIX = "shoveler-"
 
 
-def test_sites_for_sub(settings):
-    assert authz.sites_for_sub(settings.site_admins_file, ALICE) == ["nebraska"]
-    assert authz.sites_for_sub(settings.site_admins_file, BOB) == ["wisconsin"]
-    assert authz.sites_for_sub(settings.site_admins_file, NOBODY) == []
+def test_sites_for_groups():
+    assert authz.sites_for_groups(ALICE_GROUPS, PREFIX) == ["nebraska"]
+    assert authz.sites_for_groups(BOB_GROUPS, PREFIX) == ["wisconsin"]
+    # A user in no site group (only built-in COmanage groups) manages nothing.
+    assert authz.sites_for_groups(NOBODY_GROUPS, PREFIX) == []
+    assert authz.sites_for_groups((), PREFIX) == []
 
 
-def test_may_manage_site(settings):
-    assert authz.may_manage_site(settings.site_admins_file, ALICE, "nebraska")
-    assert not authz.may_manage_site(settings.site_admins_file, ALICE, "wisconsin")
+def test_sites_for_groups_multiple_and_deduped():
+    groups = ("shoveler-nebraska", "shoveler-wisconsin", "shoveler-nebraska")
+    assert authz.sites_for_groups(groups, PREFIX) == ["nebraska", "wisconsin"]
+
+
+def test_sites_for_groups_ignores_empty_and_bare_prefix():
+    # A group equal to the bare prefix has no site suffix; ignore it.
+    assert authz.sites_for_groups(("shoveler-",), PREFIX) == []
+
+
+def test_may_manage_site():
+    assert authz.may_manage_site(ALICE_GROUPS, PREFIX, "nebraska")
+    assert not authz.may_manage_site(ALICE_GROUPS, PREFIX, "wisconsin")
 
 
 def _seed(settings):
@@ -40,7 +58,9 @@ def _seed(settings):
 def test_dashboard_shows_only_user_sites(app, client, settings, monkeypatch):
     _seed(settings)
     monkeypatch.setattr(
-        main_mod, "current_user", lambda session: UserInfo(ALICE, "alice@unl.edu", "Alice")
+        main_mod,
+        "current_user",
+        lambda session: UserInfo(ALICE, "alice@unl.edu", "Alice", ALICE_GROUPS),
     )
     resp = client.get("/dashboard")
     assert resp.status_code == 200
@@ -53,7 +73,9 @@ def test_dashboard_shows_only_user_sites(app, client, settings, monkeypatch):
 
 def test_unauthorized_user_gets_not_authorized_page(app, client, settings, monkeypatch):
     monkeypatch.setattr(
-        main_mod, "current_user", lambda session: UserInfo(NOBODY, None, None)
+        main_mod,
+        "current_user",
+        lambda session: UserInfo("nobody", None, None, NOBODY_GROUPS),
     )
     resp = client.get("/dashboard")
     assert resp.status_code == 200

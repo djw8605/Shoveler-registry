@@ -8,23 +8,7 @@ from portal.config import Settings
 
 
 @pytest.fixture
-def site_admins_file(tmp_path):
-    path = tmp_path / "site-admins.yaml"
-    path.write_text(
-        """
-nebraska:
-  - sub: "http://cilogon.org/serverA/users/11111"
-    email: "alice@unl.edu"
-wisconsin:
-  - sub: "http://cilogon.org/serverA/users/22222"
-    email: "bob@wisc.edu"
-""".strip()
-    )
-    return str(path)
-
-
-@pytest.fixture
-def settings(tmp_path, site_admins_file) -> Settings:
+def settings(tmp_path) -> Settings:
     return Settings(
         cilogon_client_id="portal-test-client",
         cilogon_client_secret="portal-test-secret",
@@ -33,7 +17,6 @@ def settings(tmp_path, site_admins_file) -> Settings:
         session_secret="x" * 48,
         db_path=str(tmp_path / "portal.db"),
         signing_key_dir=str(tmp_path / "keys"),
-        site_admins_file=site_admins_file,
         token_issuer="https://portal.test/",
         resource_server_id="my_rabbit_server",
         token_ttl_seconds=14400,
@@ -43,8 +26,10 @@ def settings(tmp_path, site_admins_file) -> Settings:
         admin_contact="admin@example.org",
         token_rate_limit=1000,
         token_rate_window=60,
-        # Carol is a registry-wide admin but manages no individual site.
-        registry_admin_subs=("http://cilogon.org/serverA/users/30000",),
+        # A COmanage group named "shoveler-<site>" grants management of <site>;
+        # membership in "shoveler-admins" grants the registry-wide admin role.
+        comanage_group_prefix="shoveler-",
+        registry_admin_group="shoveler-admins",
     )
 
 

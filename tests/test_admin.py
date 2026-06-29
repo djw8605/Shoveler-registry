@@ -9,11 +9,17 @@ from portal.auth import UserInfo
 ALICE = "http://cilogon.org/serverA/users/11111"  # nebraska site-admin
 CAROL = "http://cilogon.org/serverA/users/30000"  # registry admin (conftest)
 
+ALICE_GROUPS = ("shoveler-nebraska",)
+CAROL_GROUPS = ("shoveler-admins",)  # registry admin group (conftest)
+
 
 def test_is_registry_admin(settings):
-    assert authz.is_registry_admin(settings.registry_admin_subs, CAROL)
-    assert not authz.is_registry_admin(settings.registry_admin_subs, ALICE)
-    assert not authz.is_registry_admin(settings.registry_admin_subs, None)
+    g = settings.registry_admin_group
+    assert authz.is_registry_admin(g, CAROL_GROUPS)
+    assert not authz.is_registry_admin(g, ALICE_GROUPS)
+    assert not authz.is_registry_admin(g, ())
+    # An empty admin group disables the role even for matching membership.
+    assert not authz.is_registry_admin("", CAROL_GROUPS)
 
 
 def _seed(settings):
@@ -33,7 +39,7 @@ def _seed(settings):
 
 def test_admin_sees_all_sites(app, client, settings, monkeypatch):
     _seed(settings)
-    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(CAROL, "c@x.org", "Carol"))
+    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(CAROL, "c@x.org", "Carol", CAROL_GROUPS))
     resp = client.get("/admin")
     assert resp.status_code == 200
     # Both sites' clients are visible, with owner emails.
@@ -43,7 +49,7 @@ def test_admin_sees_all_sites(app, client, settings, monkeypatch):
 
 
 def test_non_admin_cannot_reach_admin(app, client, settings, monkeypatch):
-    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(ALICE, "a@x.org", "Alice"))
+    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(ALICE, "a@x.org", "Alice", ALICE_GROUPS))
     resp = client.get("/admin", follow_redirects=False)
     assert resp.status_code == 303
     assert resp.headers["location"] == "/dashboard"
@@ -51,7 +57,7 @@ def test_non_admin_cannot_reach_admin(app, client, settings, monkeypatch):
 
 def test_admin_can_disable_any_client(app, client, settings, monkeypatch):
     _seed(settings)
-    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(CAROL, "c@x.org", "Carol"))
+    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(CAROL, "c@x.org", "Carol", CAROL_GROUPS))
     csrf = __import__("re").search(
         r'name="csrf_token" value="([^"]+)"', client.get("/admin").text
     ).group(1)
@@ -68,7 +74,7 @@ def test_admin_can_disable_any_client(app, client, settings, monkeypatch):
 
 def test_admin_disable_requires_csrf(app, client, settings, monkeypatch):
     _seed(settings)
-    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(CAROL, "c@x.org", "Carol"))
+    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(CAROL, "c@x.org", "Carol", CAROL_GROUPS))
     client.get("/admin")  # establish session/csrf
     resp = client.post(
         "/admin/shoveler-neb1/disable", data={"csrf_token": "bad"}, follow_redirects=False

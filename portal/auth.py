@@ -28,6 +28,28 @@ class UserInfo:
     sub: str
     email: Optional[str]
     name: Optional[str]
+    # COmanage group memberships from CILogon's ``isMemberOf`` claim. Drives
+    # site authorization (see ``authz.py``).
+    groups: tuple[str, ...] = ()
+
+
+def _normalize_groups(value) -> tuple[str, ...]:
+    """Coerce an ``isMemberOf`` claim into a tuple of group-name strings.
+
+    CILogon usually delivers a JSON array of strings, but tolerate a single
+    string and COmanage's object form (``{"name": ...}``) defensively.
+    """
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    groups = []
+    for item in value:
+        if isinstance(item, str):
+            groups.append(item)
+        elif isinstance(item, dict) and isinstance(item.get("name"), str):
+            groups.append(item["name"])
+    return tuple(groups)
 
 
 class OIDCError(Exception):
@@ -109,11 +131,37 @@ class OIDCClient:
         if claims.get("nonce") != expected_nonce:
             raise OIDCError("nonce mismatch")
 
+        # COmanage group memberships arrive in the ``isMemberOf`` claim (released
+        # by the ``org.cilogon.userinfo`` scope). Some CILogon deployments put it
+        # in the ID token; others only at the userinfo endpoint, so fall back to
+        # userinfo using the access token when the ID token doesn't carry it.
+        groups = _normalize_groups(claims.get("isMemberOf"))
+        if not groups and payload.get("access_token"):
+            groups = self._fetch_groups(meta, payload["access_token"])
+
         return UserInfo(
             sub=claims["sub"],
             email=claims.get("email"),
             name=claims.get("name"),
+            groups=groups,
         )
+
+    def _fetch_groups(self, meta: dict, access_token: str) -> tuple[str, ...]:
+        endpoint = meta.get("userinfo_endpoint")
+        if not endpoint:
+            return ()
+        try:
+            resp = httpx.get(
+                endpoint,
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=10,
+            )
+            resp.raise_for_status()
+            return _normalize_groups(resp.json().get("isMemberOf"))
+        except (httpx.HTTPError, ValueError):
+            # Group info is best-effort; an unreachable userinfo endpoint just
+            # means the user sees no sites until it recovers.
+            return ()
 
 
 # --- Session helpers -----------------------------------------------------
@@ -122,15 +170,21 @@ def current_user(session) -> Optional[UserInfo]:
     sub = session.get("sub")
     if not sub:
         return None
-    return UserInfo(sub=sub, email=session.get("email"), name=session.get("name"))
+    return UserInfo(
+        sub=sub,
+        email=session.get("email"),
+        name=session.get("name"),
+        groups=tuple(session.get("groups") or ()),
+    )
 
 
 def login_user(session, user: UserInfo) -> None:
     session["sub"] = user.sub
     session["email"] = user.email
     session["name"] = user.name
+    session["groups"] = list(user.groups)
 
 
 def logout_user(session) -> None:
-    for key in ("sub", "email", "name", "oidc"):
+    for key in ("sub", "email", "name", "groups", "oidc"):
         session.pop(key, None)

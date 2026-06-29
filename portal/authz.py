@@ -1,60 +1,53 @@
-"""File-based site-management allow-list.
+"""COmanage group-based site authorization.
 
-A central admin maps CILogon identities (the stable ``sub`` claim) to the
-sites they may manage. The file is reloaded on every request so edits take
-effect without a restart. There is no domain-based auto-grant: a person must
-have an explicit entry.
+Authorization is driven by the user's COmanage group memberships, delivered by
+CILogon in the ``isMemberOf`` claim at login (see ``auth.py``). There is no
+local allow-list file to maintain: a person's access follows directly from the
+groups the central admin manages in COmanage.
 
-    # site-admins.yaml
-    nebraska:
-      - sub: "http://cilogon.org/serverA/users/12345"
-        email: "derek@unl.edu"
+Convention: a group named ``<prefix><site>`` (e.g. ``shoveler-nebraska`` with
+the default ``shoveler-`` prefix) grants management of ``<site>``. The site
+name is the part of the group name after the prefix. Groups that don't start
+with the prefix (e.g. COmanage's built-in ``CO:members:active``) are ignored.
+
+Group memberships are captured into the session at login, so changes in
+COmanage take effect on the user's next login rather than instantly.
 """
 
 from __future__ import annotations
 
-import logging
-import os
-from typing import Optional
-
-import yaml
-
-log = logging.getLogger("portal.authz")
+from typing import Iterable, Optional
 
 
-def load_admins(path: str) -> dict[str, list[dict]]:
-    """Load the allow-list. Missing/empty file -> no grants (fail closed)."""
-    if not os.path.exists(path):
-        log.warning("Site-admins file %s not found; no one is authorized", path)
-        return {}
-    with open(path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
-    if not isinstance(data, dict):
-        log.error("Site-admins file %s is not a mapping; ignoring", path)
-        return {}
-    return data
+def _site_from_group(group: str, prefix: str) -> Optional[str]:
+    """Return the site a group authorizes, or None if it isn't a site group."""
+    if not group.startswith(prefix):
+        return None
+    site = group[len(prefix):].strip()
+    return site or None
 
 
-def sites_for_sub(path: str, sub: Optional[str]) -> list[str]:
-    """Return the sorted list of sites the given ``sub`` may manage."""
-    if not sub:
-        return []
-    admins = load_admins(path)
-    sites = []
-    for site, members in admins.items():
-        if not isinstance(members, list):
+def sites_for_groups(groups: Iterable[str], prefix: str) -> list[str]:
+    """Return the sorted, de-duplicated sites the given groups may manage."""
+    sites = set()
+    for group in groups or ():
+        if not isinstance(group, str):
             continue
-        for member in members:
-            if isinstance(member, dict) and member.get("sub") == sub:
-                sites.append(site)
-                break
+        site = _site_from_group(group, prefix)
+        if site:
+            sites.add(site)
     return sorted(sites)
 
 
-def may_manage_site(path: str, sub: Optional[str], site: str) -> bool:
-    return site in sites_for_sub(path, sub)
+def may_manage_site(groups: Iterable[str], prefix: str, site: str) -> bool:
+    return site in sites_for_groups(groups, prefix)
 
 
-def is_registry_admin(admin_subs, sub: Optional[str]) -> bool:
-    """Registry-wide admins are listed by sub in deploy config (REGISTRY_ADMIN_SUBS)."""
-    return bool(sub) and sub in (admin_subs or ())
+def is_registry_admin(admin_group: Optional[str], groups: Iterable[str]) -> bool:
+    """Registry-wide admins are members of the configured REGISTRY_ADMIN_GROUP.
+
+    An empty/unset ``admin_group`` disables the admin role entirely.
+    """
+    if not admin_group:
+        return False
+    return admin_group in (groups or ())

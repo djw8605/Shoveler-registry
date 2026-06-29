@@ -92,7 +92,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ctx.setdefault(
             "is_admin",
             authz.is_registry_admin(
-                settings.registry_admin_subs, user.sub if user else None
+                settings.registry_admin_group, user.groups if user else ()
             ),
         )
         return templates.TemplateResponse(request, name, ctx)
@@ -143,7 +143,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         user = current_user(request.session)
         if not user:
             return RedirectResponse("/", status_code=303)
-        sites = authz.sites_for_sub(settings.site_admins_file, user.sub)
+        sites = authz.sites_for_groups(user.groups, settings.comanage_group_prefix)
         if not sites:
             return render(
                 request,
@@ -165,7 +165,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         user = current_user(request.session)
         if not user:
             return RedirectResponse("/", status_code=303)
-        if not authz.is_registry_admin(settings.registry_admin_subs, user.sub):
+        if not authz.is_registry_admin(settings.registry_admin_group, user.groups):
             _flash(request.session, "Not authorized for the admin view.", "error")
             return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
@@ -186,7 +186,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         user = current_user(request.session)
         if not user:
             return RedirectResponse("/", status_code=303)
-        if not authz.is_registry_admin(settings.registry_admin_subs, user.sub):
+        if not authz.is_registry_admin(settings.registry_admin_group, user.groups):
             _flash(request.session, "Not authorized for the admin view.", "error")
             return RedirectResponse("/dashboard", status_code=303)
         if not _check_csrf(request.session, csrf_token):
@@ -213,7 +213,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if not _check_csrf(request.session, csrf_token):
             _flash(request.session, "Invalid CSRF token.", "error")
             return RedirectResponse("/dashboard", status_code=303)
-        if not authz.may_manage_site(settings.site_admins_file, user.sub, site):
+        if not authz.may_manage_site(
+            user.groups, settings.comanage_group_prefix, site
+        ):
             _flash(request.session, "You may not manage that site.", "error")
             return RedirectResponse("/dashboard", status_code=303)
 
@@ -374,7 +376,9 @@ def _owns(row, user, settings: Settings) -> bool:
         return False
     if row["owner_sub"] != user.sub:
         return False
-    return authz.may_manage_site(settings.site_admins_file, user.sub, row["site"])
+    return authz.may_manage_site(
+        user.groups, settings.comanage_group_prefix, row["site"]
+    )
 
 
 def _client_view(row, idle_days: int) -> dict:

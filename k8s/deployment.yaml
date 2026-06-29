@@ -31,14 +31,9 @@ spec:
               value: /data/portal.db
             - name: SIGNING_KEY_DIR
               value: /data/keys
-            - name: SITE_ADMINS_FILE
-              value: /config/site-admins.yaml
           volumeMounts:
             - name: data
               mountPath: /data
-            - name: site-admins
-              mountPath: /config
-              readOnly: true
           readinessProbe:
             httpGet:
               path: /healthz
@@ -68,10 +63,6 @@ spec:
         - name: data
           persistentVolumeClaim:
             claimName: shoveler-auth-portal-data
-        # The allow-list, managed by the central admin (e.g. a ConfigMap).
-        - name: site-admins
-          configMap:
-            name: shoveler-auth-site-admins
 ---
 apiVersion: v1
 kind: PersistentVolumeClaim
