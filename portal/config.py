@@ -53,6 +53,8 @@ class Settings:
     # Per-client-IP rate limit on /register: N requests per window seconds.
     register_rate_limit: int
     register_rate_window: int
+    # Reject client assertions whose exp is further than this in the future.
+    assertion_max_lifetime_seconds: int
 
     # --- COmanage group-based authorization ---
     # Site authorization comes from the CILogon ``isMemberOf`` claim (the
@@ -67,6 +69,17 @@ class Settings:
     @property
     def redirect_uri(self) -> str:
         return self.portal_base_url.rstrip("/") + "/auth/callback"
+
+    @property
+    def token_endpoint_audiences(self) -> frozenset[str]:
+        """Accepted ``aud`` values for client assertions at /token (exact match)."""
+        return frozenset(
+            {
+                self.portal_base_url.rstrip("/") + "/token",
+                self.token_issuer.rstrip("/") + "/token",
+                self.token_issuer,
+            }
+        )
 
 
 @lru_cache(maxsize=1)
@@ -98,6 +111,9 @@ def get_settings() -> Settings:
         ),
         register_rate_limit=int(os.environ.get("REGISTER_RATE_LIMIT", "10")),
         register_rate_window=int(os.environ.get("REGISTER_RATE_WINDOW", "60")),
+        assertion_max_lifetime_seconds=int(
+            os.environ.get("ASSERTION_MAX_LIFETIME_SECONDS", "300")
+        ),
         comanage_group_prefix=os.environ.get("COMANAGE_GROUP_PREFIX", "shoveler-"),
         registry_admin_group=os.environ.get("REGISTRY_ADMIN_GROUP", "").strip(),
     )

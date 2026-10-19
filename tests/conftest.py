@@ -29,6 +29,7 @@ def settings(tmp_path) -> Settings:
         registration_token_ttl_seconds=259200,
         register_rate_limit=1000,
         register_rate_window=60,
+        assertion_max_lifetime_seconds=300,
         # A COmanage group named "shoveler-<site>" grants management of <site>;
         # membership in "shoveler-admins" grants the registry-wide admin role.
         comanage_group_prefix="shoveler-",

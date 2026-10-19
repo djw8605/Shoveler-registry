@@ -1,8 +1,10 @@
 """Token minting and the client-credentials grant logic.
 
-Secrets are hashed with argon2 and verified in constant time. The ``/token``
-endpoint returns a uniform ``invalid_client`` for any failure (unknown id,
-disabled client, or wrong secret) so it never reveals which was wrong.
+Clients authenticate with ``private_key_jwt`` (RFC 7523): a short-lived JWT
+signed by the private key whose public half they registered (see
+registration.py). The ``/token`` endpoint returns a uniform ``invalid_client``
+for any authentication failure (unknown or disabled client, bad signature,
+wrong audience, expired or replayed assertion) so it never reveals which.
 """
 
 from __future__ import annotations
@@ -17,23 +19,15 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import jwt
-from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError
+from jwt.algorithms import RSAAlgorithm
 
 from . import db
 from .config import Settings
 from .keys import ALG, KeyStore
 
-_hasher = PasswordHasher()
-
-# A real hash of a random secret, verified against when the client_id is
-# unknown so that path costs the same argon2 work as a wrong secret.
-_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(32))
-
-
-def generate_secret() -> str:
-    """High-entropy client secret; shown once, never stored in the clear."""
-    return secrets.token_urlsafe(32)
+ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+# Clock-skew allowance for client assertions' exp/iat.
+ASSERTION_LEEWAY_SECONDS = 60
 
 
 def generate_registration_token() -> str:
@@ -49,20 +43,6 @@ def hash_registration_token(token: str) -> str:
 
 def generate_client_id() -> str:
     return "shoveler-" + secrets.token_hex(8)
-
-
-def hash_secret(secret: str) -> str:
-    return _hasher.hash(secret)
-
-
-def verify_secret(secret_hash: str, secret: str) -> bool:
-    try:
-        return _hasher.verify(secret_hash, secret)
-    except VerifyMismatchError:
-        return False
-    except Exception:
-        # Malformed stored hash, etc. Treat as a mismatch; never raise to caller.
-        return False
 
 
 def build_claims(settings: Settings, client_id: str) -> dict:
@@ -99,6 +79,10 @@ class TokenError(Exception):
         super().__init__(error)
 
 
+def _invalid_client() -> TokenError:
+    return TokenError(401, "invalid_client")
+
+
 @dataclass
 class TokenResponse:
     access_token: str
@@ -114,7 +98,7 @@ class TokenResponse:
 
 
 class RateLimiter:
-    """Tiny in-process sliding-window limiter, keyed by client_id."""
+    """Tiny in-process sliding-window limiter, keyed by client_id or client IP."""
 
     def __init__(self, limit: int, window: int):
         self.limit = limit
@@ -132,38 +116,88 @@ class RateLimiter:
         return True
 
 
+def assertion_subject(assertion: Optional[str]) -> Optional[str]:
+    """The UNVERIFIED ``sub`` of a client assertion.
+
+    Only for looking up the client and keying the rate limiter; nothing is
+    trusted until verify_assertion has checked the signature.
+    """
+    if not assertion:
+        return None
+    try:
+        claims = jwt.decode(assertion, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return None
+    sub = claims.get("sub")
+    return sub if isinstance(sub, str) and sub else None
+
+
+def verify_assertion(settings: Settings, client, assertion: str) -> dict:
+    """Fully verify a client assertion against the client's registered key.
+
+    Returns the verified claims, or raises TokenError(invalid_client).
+    """
+    try:
+        header = jwt.get_unverified_header(assertion)
+        if header.get("kid") != client["kid"]:
+            raise _invalid_client()
+        key = RSAAlgorithm.from_jwk(client["public_jwk"])
+        claims = jwt.decode(
+            assertion,
+            key,
+            # RS256 only: rejects alg "none" and HS256-with-the-public-key.
+            algorithms=["RS256"],
+            audience=sorted(settings.token_endpoint_audiences),
+            issuer=client["client_id"],
+            leeway=ASSERTION_LEEWAY_SECONDS,
+            options={"require": ["exp", "iat", "jti", "iss", "sub", "aud"]},
+        )
+    except jwt.PyJWTError:
+        raise _invalid_client() from None
+    if claims["sub"] != client["client_id"]:
+        raise _invalid_client()
+    if not isinstance(claims["jti"], str) or not claims["jti"]:
+        raise _invalid_client()
+    if claims["exp"] > time.time() + settings.assertion_max_lifetime_seconds:
+        raise _invalid_client()
+    return claims
+
+
 def issue_token(
     conn,
     settings: Settings,
     keystore: KeyStore,
     *,
     grant_type: Optional[str],
-    client_id: Optional[str],
-    client_secret: Optional[str],
+    client_assertion_type: Optional[str],
+    client_assertion: Optional[str],
 ) -> TokenResponse:
-    """Validate a client-credentials request and mint a token.
+    """Authenticate a private_key_jwt client-credentials request and mint a token.
 
     Raises TokenError on any failure.
     """
     if grant_type != "client_credentials":
         raise TokenError(400, "unsupported_grant_type")
+    if client_assertion_type != ASSERTION_TYPE or not client_assertion:
+        raise _invalid_client()
 
-    if not client_id or not client_secret:
-        raise TokenError(401, "invalid_client")
+    client_id = assertion_subject(client_assertion)
+    client = db.get_client(conn, client_id) if client_id else None
+    if client is None or client["disabled"]:
+        raise _invalid_client()
 
-    row = db.get_client(conn, client_id)
-    if row is None:
-        # Verify against a dummy hash to keep timing roughly uniform.
-        verify_secret(_DUMMY_HASH, client_secret)
-        raise TokenError(401, "invalid_client")
+    claims = verify_assertion(settings, client, client_assertion)
+    # Each assertion is single-use. Rows can be purged once even the leeway
+    # can no longer make their exp acceptable.
+    if not db.record_assertion(
+        conn,
+        client_id=client["client_id"],
+        jti=claims["jti"],
+        exp=int(claims["exp"]),
+        purge_before=int(time.time()) - ASSERTION_LEEWAY_SECONDS,
+    ):
+        raise _invalid_client()
 
-    if row["disabled"]:
-        verify_secret(row["secret_hash"], client_secret)
-        raise TokenError(401, "invalid_client")
-
-    if not verify_secret(row["secret_hash"], client_secret):
-        raise TokenError(401, "invalid_client")
-
-    token = mint_token(settings, keystore, client_id)
-    db.touch_last_used(conn, client_id)
+    token = mint_token(settings, keystore, client["client_id"])
+    db.touch_last_used(conn, client["client_id"])
     return TokenResponse(access_token=token, expires_in=settings.token_ttl_seconds)

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import logging
 import secrets
 from typing import Optional
@@ -302,14 +300,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     @app.post("/token")
     async def token_endpoint(request: Request):
         form = await request.form()
-        grant_type = form.get("grant_type")
-        client_id = form.get("client_id")
-        client_secret = form.get("client_secret")
-
-        # HTTP Basic per RFC 6749 takes precedence if present.
-        basic = _parse_basic_auth(request.headers.get("authorization"))
-        if basic:
-            client_id, client_secret = basic
+        assertion = form.get("client_assertion")
+        if not isinstance(assertion, str):  # absent, or a multipart file part
+            assertion = None
+        # Unverified; only used to key the limiter (issue_token verifies).
+        client_id = tokens.assertion_subject(assertion)
 
         if client_id and not app.state.rate_limiter.check(client_id):
             return JSONResponse(
@@ -325,9 +320,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                     conn,
                     settings,
                     app.state.keystore,
-                    grant_type=grant_type,
-                    client_id=client_id,
-                    client_secret=client_secret,
+                    grant_type=form.get("grant_type"),
+                    client_assertion_type=form.get("client_assertion_type"),
+                    client_assertion=assertion,
                 )
             except tokens.TokenError as exc:
                 return JSONResponse({"error": exc.error}, status_code=exc.status)
@@ -383,11 +378,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 "issuer": settings.token_issuer,
                 "jwks_uri": base + "/.well-known/jwks.json",
                 "token_endpoint": base + "/token",
+                "registration_endpoint": base + "/register",
                 "grant_types_supported": ["client_credentials"],
-                "token_endpoint_auth_methods_supported": [
-                    "client_secret_basic",
-                    "client_secret_post",
-                ],
+                "token_endpoint_auth_methods_supported": ["private_key_jwt"],
+                "token_endpoint_auth_signing_alg_values_supported": ["RS256"],
             }
         )
 
@@ -435,19 +429,6 @@ def _client_view(row, idle_days: int) -> dict:
         "status": status,
         "disabled_reason": row["disabled_reason"],
     }
-
-
-def _parse_basic_auth(header: Optional[str]) -> Optional[tuple[str, str]]:
-    if not header or not header.lower().startswith("basic "):
-        return None
-    try:
-        raw = base64.b64decode(header.split(" ", 1)[1], validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError, IndexError):
-        return None
-    if ":" not in raw:
-        return None
-    cid, secret = raw.split(":", 1)
-    return cid, secret
 
 
 def _shoveler_snippet(settings: Settings, client_id: str, secret: str) -> str:
