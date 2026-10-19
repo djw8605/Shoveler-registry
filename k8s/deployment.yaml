@@ -36,6 +36,13 @@ spec:
               value: /data/portal.db
             - name: SIGNING_KEY_DIR
               value: /data/keys
+            # uvicorn --proxy-headers only trusts 127.0.0.1 by default, so
+            # X-Forwarded-* from the ingress controller would be ignored. The
+            # app builds its URLs from PORTAL_BASE_URL, so this mainly affects
+            # access logs; narrow it to the ingress controller's pod CIDR if
+            # you prefer.
+            - name: FORWARDED_ALLOW_IPS
+              value: "*"
           volumeMounts:
             - name: data
               mountPath: /data
