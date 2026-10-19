@@ -88,7 +88,9 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   `isMemberOf` claim (captured into the session at login). A group
   `<COMANAGE_GROUP_PREFIX><site>` grants management of `<site>`
   (`authz.sites_for_groups`); members of `REGISTRY_ADMIN_GROUP` see all via
-  `/admin`. No allow-list file, no email-domain auto-grant — group membership
+  `/admin`. The admin group is never a site, even if it has the prefix:
+  `sites_for_groups`/`may_manage_site` take a required `admin_group=` keyword
+  to exclude it; always pass `settings.registry_admin_group`. No allow-list file, no email-domain auto-grant — group membership
   is the only grant. Group changes take effect on next login, not instantly.
 - **Sessions:** cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` whenever
   `PORTAL_BASE_URL` is https.

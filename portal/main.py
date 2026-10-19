@@ -145,7 +145,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         user = current_user(request.session)
         if not user:
             return RedirectResponse("/", status_code=303)
-        sites = authz.sites_for_groups(user.groups, settings.comanage_group_prefix)
+        sites = authz.sites_for_groups(
+            user.groups,
+            settings.comanage_group_prefix,
+            admin_group=settings.registry_admin_group,
+        )
         if not sites:
             return render(
                 request,
@@ -226,7 +230,10 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             _flash(request.session, "Invalid CSRF token.", "error")
             return RedirectResponse("/dashboard", status_code=303)
         if not authz.may_manage_site(
-            user.groups, settings.comanage_group_prefix, site
+            user.groups,
+            settings.comanage_group_prefix,
+            site,
+            admin_group=settings.registry_admin_group,
         ):
             _flash(request.session, "You may not manage that site.", "error")
             return RedirectResponse("/dashboard", status_code=303)
@@ -444,7 +451,10 @@ def _owns(row, user, settings: Settings) -> bool:
     if row["owner_sub"] != user.sub:
         return False
     return authz.may_manage_site(
-        user.groups, settings.comanage_group_prefix, row["site"]
+        user.groups,
+        settings.comanage_group_prefix,
+        row["site"],
+        admin_group=settings.registry_admin_group,
     )
 
 

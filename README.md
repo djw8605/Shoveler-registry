@@ -116,7 +116,10 @@ central admin manages in COmanage.
 of `<site>`. With the default `shoveler-` prefix, membership in the COmanage
 group `shoveler-nebraska` lets a user manage site `nebraska`. The site name is
 the part of the group name after the prefix; groups that don't start with the
-prefix (e.g. COmanage's built-in `CO:members:active`) are ignored.
+prefix (e.g. COmanage's built-in `CO:members:active`) are ignored. The
+`REGISTRY_ADMIN_GROUP` is never a site group, even when it starts with the
+prefix: `shoveler-admins` makes its members registry admins, not managers of a
+site called `admins`.
 
 Group memberships are captured into the session **at login**, so changes in
 COmanage take effect on the user's next login rather than instantly. A user
