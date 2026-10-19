@@ -5,6 +5,10 @@ signed by the private key whose public half they registered (see
 registration.py). The ``/token`` endpoint returns a uniform ``invalid_client``
 for any authentication failure (unknown or disabled client, bad signature,
 wrong audience, expired or replayed assertion) so it never reveals which.
+
+A pending client (registered without a token, not yet approved) that proves
+possession of its key gets ``400 authorization_pending`` instead of a token;
+the shoveler keeps polling until an approver assigns its site.
 """
 
 from __future__ import annotations
@@ -197,6 +201,9 @@ def issue_token(
         purge_before=int(time.time()) - ASSERTION_LEEWAY_SECONDS,
     ):
         raise _invalid_client()
+    # Only after full verification, so only the key holder learns it's pending.
+    if client["pending"]:
+        raise TokenError(400, "authorization_pending")
 
     token = mint_token(settings, keystore, client["client_id"])
     db.touch_last_used(conn, client["client_id"])

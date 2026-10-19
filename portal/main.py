@@ -401,14 +401,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             body = await request.json()
         except ValueError:
             body = None
-        bearer = registration.parse_bearer(request.headers.get("authorization"))
         conn = db.connect(settings.db_path)
         try:
-            result = registration.register(conn, bearer=bearer, body=body)
+            result = registration.register(
+                conn,
+                settings,
+                authorization=request.headers.get("authorization"),
+                body=body,
+                registered_ip=ip,
+            )
         except registration.RegistrationError as exc:
             headers = {"Cache-Control": "no-store"}
             if exc.status == 401:
                 headers["WWW-Authenticate"] = 'Bearer error="invalid_token"'
+            if exc.status == 503:
+                headers["Retry-After"] = "300"
             return JSONResponse(exc.as_dict(), status_code=exc.status, headers=headers)
         finally:
             conn.close()

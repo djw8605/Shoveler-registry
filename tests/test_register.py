@@ -105,11 +105,11 @@ def test_revoked_token_is_rejected(client, settings):
     _assert_invalid_token(_register(client, token, registration_body(new_key())))
 
 
-@pytest.mark.parametrize("auth", [None, "Bearer", "Bearer garbage", "Basic abc"])
-def test_missing_or_garbage_bearer_is_rejected(client, settings, auth):
+@pytest.mark.parametrize("auth", ["Bearer", "Bearer garbage", "Basic abc"])
+def test_garbage_authorization_is_rejected_not_pending(client, settings, auth):
+    # A present but bad token never falls back to a pending registration.
     seed_token(settings)
-    headers = {"Authorization": auth} if auth else {}
-    resp = client.post("/register", json=registration_body(new_key()), headers=headers)
+    resp = client.post("/register", json=registration_body(new_key()), headers={"Authorization": auth})
     _assert_invalid_token(resp)
     assert _client_count(settings) == 0
 
@@ -191,7 +191,9 @@ def test_concurrent_use_creates_exactly_one_client(settings):
         conn = db.connect(settings.db_path)
         try:
             barrier.wait()
-            results.append(registration.register(conn, bearer=token, body=body))
+            results.append(
+                registration.register(conn, settings, authorization=f"Bearer {token}", body=body)
+            )
         except registration.RegistrationError as exc:
             results.append(exc.status)
         finally:
@@ -219,3 +221,65 @@ def test_register_is_rate_limited_per_ip(settings):
     resp = _register(client, "nope", registration_body(new_key()))
     assert resp.status_code == 429
     assert resp.headers["retry-after"] == "60"
+
+
+# --- Token-less (pending) registration -------------------------------------
+
+def test_no_token_creates_pending_client(client, settings):
+    key = new_key()
+    resp = client.post("/register", json=registration_body(key, client_name="shoveler@xrd1"))
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["client_id"].startswith("shoveler-")
+    assert body["client_name"] == "shoveler@xrd1"
+    conn = db.connect(settings.db_path)
+    try:
+        row = db.get_client(conn, body["client_id"])
+        assert row["pending"] == 1
+        assert row["site"] is None and row["owner_sub"] is None
+        assert row["registered_ip"] == "testclient"
+        assert row["kid"] == public_jwk(key)["kid"]
+    finally:
+        conn.close()
+
+
+def test_no_token_retry_with_same_key_returns_same_client(client, settings):
+    key = new_key()
+    first = client.post("/register", json=registration_body(key)).json()["client_id"]
+    again = client.post("/register", json=registration_body(key)).json()["client_id"]
+    assert first == again
+    assert _client_count(settings) == 1
+
+
+def test_no_token_bad_metadata_is_rejected(client, settings):
+    resp = client.post("/register", json=registration_body(new_key(1024)))
+    assert resp.status_code == 400
+    assert resp.json()["error"] == "invalid_client_metadata"
+    assert _client_count(settings) == 0
+
+
+def test_no_token_rejected_when_pending_registration_disabled(settings):
+    from portal.main import create_app
+
+    off = dataclasses.replace(settings, allow_pending_registration=False)
+    client = TestClient(create_app(off), base_url="https://testserver")
+    _assert_invalid_token(client.post("/register", json=registration_body(new_key())))
+    assert _client_count(settings) == 0
+    # Token registration still works.
+    token = seed_token(settings)
+    assert _register(client, token, registration_body(new_key())).status_code == 201
+
+
+def test_pending_registrations_are_capped(settings):
+    from portal.main import create_app
+
+    capped = dataclasses.replace(settings, max_pending_clients=1)
+    client = TestClient(create_app(capped), base_url="https://testserver")
+    assert client.post("/register", json=registration_body(new_key())).status_code == 201
+    resp = client.post("/register", json=registration_body(new_key()))
+    assert resp.status_code == 503
+    assert resp.json()["error"] == "temporarily_unavailable"
+    assert resp.headers["retry-after"] == "300"
+    # The cap doesn't apply to token registrations.
+    token = seed_token(settings)
+    assert _register(client, token, registration_body(new_key())).status_code == 201

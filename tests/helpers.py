@@ -133,3 +133,23 @@ def seed_client(settings, client_id: str, *, key=None, site="nebraska",
     finally:
         conn.close()
     return key
+
+
+def seed_pending(settings, client_id: str, *, key=None, client_name="shoveler@host"):
+    """Create a pending (token-less, unapproved) client; returns its key."""
+    key = key or shared_key()
+    db.init_db(settings.db_path)
+    conn = db.connect(settings.db_path)
+    try:
+        db.insert_pending_client(
+            conn,
+            client_id=client_id,
+            client_name=client_name,
+            public_jwk=json.dumps(public_jwk(key)),
+            kid=kid_for(key),
+            key_thumbprint=kid_for(key),
+            registered_ip="192.0.2.7",
+        )
+    finally:
+        conn.close()
+    return key

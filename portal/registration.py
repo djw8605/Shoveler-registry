@@ -9,6 +9,12 @@ the token's site is created; from then on the shoveler authenticates at
 Being minted by a member of ``<prefix><site>`` is the approval: the new client
 is active immediately. RFC 7592 client management is deliberately not offered,
 so no ``registration_access_token`` is ever issued.
+
+A shoveler may also register WITHOUT a token (no Authorization header, when
+ALLOW_PENDING_REGISTRATION is on). It then gets a pending client with no site:
+/token answers ``authorization_pending`` until a site manager or registry admin
+approves it on the dashboard and picks its site. A present but bad token is
+always 401; it never falls back to pending.
 """
 
 from __future__ import annotations
@@ -52,6 +58,13 @@ class RegistrationError(Exception):
 def _invalid_token() -> RegistrationError:
     # One uniform response for missing/unknown/expired/revoked/used tokens.
     return RegistrationError(401, "invalid_token")
+
+
+def _too_many_pending() -> RegistrationError:
+    # 503 so the shoveler retries (it treats most 4xx as permanent).
+    return RegistrationError(
+        503, "temporarily_unavailable", "too many registrations awaiting approval"
+    )
 
 
 def _bad_metadata(description: str) -> RegistrationError:
@@ -150,14 +163,64 @@ def _response(client) -> dict:
     return body
 
 
-def register(conn, *, bearer: Optional[str], body) -> dict:
-    """Spend a registration token and create a client. Returns the 201 body.
+def register(
+    conn,
+    settings,
+    *,
+    authorization: Optional[str],
+    body,
+    registered_ip: Optional[str] = None,
+) -> dict:
+    """Handle a /register request. Returns the 201 body.
 
-    Raises RegistrationError on any failure. A retry of a registration whose
-    response was lost (same token, same key) returns the original client.
+    With a bearer registration token the client is created active; with no
+    Authorization header at all it is created pending (if allowed). Raises
+    RegistrationError on any failure.
     """
+    if not authorization or not authorization.strip():
+        if not settings.allow_pending_registration:
+            raise _invalid_token()
+        return _register_pending(
+            conn, settings, body=body, registered_ip=registered_ip
+        )
+    bearer = parse_bearer(authorization)
     if not bearer:
         raise _invalid_token()
+    return _register_with_token(conn, bearer=bearer, body=body)
+
+
+def _register_pending(conn, settings, *, body, registered_ip: Optional[str]) -> dict:
+    """Create a pending client for a token-less registration.
+
+    Retrying with the same key returns the existing client instead of piling
+    up duplicates. (A public key isn't secret, but neither is a client_id: only
+    the private key's holder can use the client.)
+    """
+    meta = validate_metadata(body)
+    existing = db.find_client_by_thumbprint(conn, meta.thumbprint)
+    if existing is not None:
+        return _response(existing)
+    if db.count_pending_clients(conn) >= settings.max_pending_clients:
+        raise _too_many_pending()
+    client_id = tokens.generate_client_id()
+    db.insert_pending_client(
+        conn,
+        client_id=client_id,
+        client_name=meta.client_name,
+        public_jwk=json.dumps(meta.public_jwk),
+        kid=meta.kid,
+        key_thumbprint=meta.thumbprint,
+        registered_ip=registered_ip,
+    )
+    return _response(db.get_client(conn, client_id))
+
+
+def _register_with_token(conn, *, bearer: str, body) -> dict:
+    """Spend a registration token and create an active client.
+
+    A retry of a registration whose response was lost (same token, same key)
+    returns the original client.
+    """
     token_hash = tokens.hash_registration_token(bearer)
     now = datetime.now(timezone.utc)
 

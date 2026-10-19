@@ -12,6 +12,13 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 
+def _bool(name: str, default: bool) -> bool:
+    val = os.environ.get(name)
+    if val is None or not val.strip():
+        return default
+    return val.strip().lower() in ("1", "true", "yes", "on")
+
+
 def _require(name: str) -> str:
     val = os.environ.get(name)
     if not val:
@@ -55,6 +62,13 @@ class Settings:
     register_rate_window: int
     # Reject client assertions whose exp is further than this in the future.
     assertion_max_lifetime_seconds: int
+    # Token-less registration: a shoveler that registers without a token is
+    # held as pending until a site manager or registry admin approves it.
+    allow_pending_registration: bool
+    # At most this many pending clients at once (bounds open registration).
+    max_pending_clients: int
+    # Pending clients not approved within this long are deleted (expire job).
+    pending_client_ttl_seconds: int
 
     # --- COmanage group-based authorization ---
     # Site authorization comes from the CILogon ``isMemberOf`` claim (the
@@ -113,6 +127,11 @@ def get_settings() -> Settings:
         register_rate_window=int(os.environ.get("REGISTER_RATE_WINDOW", "60")),
         assertion_max_lifetime_seconds=int(
             os.environ.get("ASSERTION_MAX_LIFETIME_SECONDS", "300")
+        ),
+        allow_pending_registration=_bool("ALLOW_PENDING_REGISTRATION", True),
+        max_pending_clients=int(os.environ.get("MAX_PENDING_CLIENTS", "100")),
+        pending_client_ttl_seconds=int(
+            os.environ.get("PENDING_CLIENT_TTL_SECONDS", "604800")
         ),
         comanage_group_prefix=os.environ.get("COMANAGE_GROUP_PREFIX", "shoveler-"),
         registry_admin_group=os.environ.get("REGISTRY_ADMIN_GROUP", "").strip(),

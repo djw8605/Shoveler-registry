@@ -21,6 +21,7 @@ from helpers import (
     make_assertion,
     new_key,
     seed_client,
+    seed_pending,
     token_form,
 )
 from portal import db
@@ -282,3 +283,26 @@ def test_discovery_advertises_registration_and_private_key_jwt(client):
     assert doc["token_endpoint"] == "https://portal.test/token"
     assert doc["token_endpoint_auth_methods_supported"] == ["private_key_jwt"]
     assert doc["token_endpoint_auth_signing_alg_values_supported"] == ["RS256"]
+
+
+def test_pending_client_gets_authorization_pending(client, settings):
+    key = seed_pending(settings, "shoveler-pend1", key=new_key())
+    resp = _post(client, make_assertion(key, "shoveler-pend1", _aud(settings)))
+    assert resp.status_code == 400
+    assert resp.json() == {"error": "authorization_pending"}
+
+    # Approved: the same key now gets tokens.
+    conn = db.connect(settings.db_path)
+    try:
+        db.approve_client(conn, "shoveler-pend1", site="nebraska", owner_sub="a", owner_email=None)
+    finally:
+        conn.close()
+    assert _post(client, make_assertion(key, "shoveler-pend1", _aud(settings))).status_code == 200
+
+
+def test_pending_status_needs_a_valid_assertion(client, settings):
+    # Without the private key you learn nothing: same invalid_client as always.
+    key = seed_pending(settings, "shoveler-pend1", key=new_key())
+    _assert_invalid_client(
+        _post(client, make_assertion(new_key(), "shoveler-pend1", _aud(settings), kid=kid_for(key)))
+    )
