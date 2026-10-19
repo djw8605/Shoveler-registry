@@ -7,11 +7,18 @@
   <div>
     <h1 class="text-xl font-semibold tracking-tight text-slate-900">Your sites</h1>
     <p class="mt-1 text-sm text-slate-500">
-      To add a shoveler, create a registration token and give it to the shoveler. It
-      registers its own key with the token; no secret is ever shared. Tokens are
-      single-use and shown only once.
+      To add a shoveler, either create a registration token and give it to the
+      shoveler (it is active as soon as it registers), or start the shoveler without
+      one and approve it below. Either way it registers its own key; no secret is
+      ever shared.
     </p>
   </div>
+
+  {% if pending %}
+    {% call ui.card(title="Awaiting approval (" ~ pending|length ~ ")") %}
+      {{ ui.pending_table(pending, csrf_token, "/dashboard", sites=sites) }}
+    {% endcall %}
+  {% endif %}
 
   {% for site in sites %}
     {% call ui.card(title=site) %}

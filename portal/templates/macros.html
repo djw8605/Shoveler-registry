@@ -48,3 +48,69 @@
     </div>
   {% endif %}
 {% endmacro %}
+
+{# Shoveler registrations awaiting approval. With `sites`, the approver picks one
+   of their own sites; without (registry admin), they type any site, with
+   `known_sites` as suggestions. #}
+{% macro pending_table(pending, csrf_token, return_to, sites=None, known_sites=()) %}
+  <p class="mb-3 text-sm text-slate-600">
+    These shovelers registered without a token and can't send data until approved.
+    Approve only one you recognise: its <code class="font-mono text-xs">client_id</code>
+    appears in the shoveler's log ("registration complete, client_id: …").
+  </p>
+  <div class="overflow-x-auto">
+    <table class="min-w-full divide-y divide-slate-200 text-sm">
+      <thead>
+        <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
+          <th class="py-2 pr-4">client_id</th>
+          <th class="py-2 pr-4">Name</th>
+          <th class="py-2 pr-4">Key</th>
+          <th class="py-2 pr-4">From</th>
+          <th class="py-2 pr-4">Registered</th>
+          <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
+        </tr>
+      </thead>
+      <tbody class="divide-y divide-slate-100">
+        {% for p in pending %}
+          <tr>
+            <td class="py-3 pr-4 font-mono text-xs text-slate-900">{{ p.client_id }}</td>
+            <td class="py-3 pr-4 text-slate-600">{{ p.client_name or "—" }}</td>
+            <td class="py-3 pr-4 font-mono text-xs text-slate-500" title="RFC 7638 key thumbprint">{{ p.thumbprint }}…</td>
+            <td class="py-3 pr-4 font-mono text-xs text-slate-500">{{ p.registered_ip or "—" }}</td>
+            <td class="py-3 pr-4 text-slate-600">{{ p.created_at[:16] | replace("T", " ") }}</td>
+            <td class="py-3 pr-4">
+              <div class="flex justify-end gap-2">
+                <form method="post" action="/pending/{{ p.client_id }}/approve" class="flex items-center gap-2"
+                      onsubmit="return confirm('Approve {{ p.client_id }} for site ' + this.site.value + '? It will start receiving tokens.');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input type="hidden" name="return_to" value="{{ return_to }}" />
+                  {% if sites %}
+                    <select name="site" aria-label="Site" class="rounded-md border-slate-300 py-1.5 text-sm">
+                      {% for s in sites %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
+                    </select>
+                  {% else %}
+                    <input type="text" name="site" required maxlength="100" placeholder="site"
+                           aria-label="Site" list="known-sites"
+                           class="w-32 rounded-md border-slate-300 py-1.5 text-sm" />
+                  {% endif %}
+                  {{ button("Approve", "submit", "primary") }}
+                </form>
+                <form method="post" action="/pending/{{ p.client_id }}/reject"
+                      onsubmit="return confirm('Reject {{ p.client_id }}? Its registration is deleted; it would have to register again.');">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                  <input type="hidden" name="return_to" value="{{ return_to }}" />
+                  {{ button("Reject", "submit", "danger") }}
+                </form>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if not sites %}
+    <datalist id="known-sites">
+      {% for s in known_sites %}<option value="{{ s }}"></option>{% endfor %}
+    </datalist>
+  {% endif %}
+{% endmacro %}

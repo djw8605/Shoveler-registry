@@ -12,6 +12,12 @@
     </p>
   </div>
 
+  {% if pending %}
+    {% call ui.card(title="Awaiting approval (" ~ pending|length ~ ")") %}
+      {{ ui.pending_table(pending, csrf_token, "/admin", known_sites=known_sites) }}
+    {% endcall %}
+  {% endif %}
+
   {% call ui.card() %}
     {% if clients %}
       <div class="overflow-x-auto">

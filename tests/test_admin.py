@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import portal.main as main_mod
-from helpers import kid_for, seed_client, shared_key
+from helpers import kid_for, seed_client, seed_pending, shared_key
 from portal import authz, db
 from portal.auth import UserInfo
 
@@ -81,3 +81,58 @@ def test_admin_disable_requires_csrf(app, client, settings, monkeypatch):
         assert db.get_client(conn, "shoveler-neb1")["disabled"] == 0
     finally:
         conn.close()
+
+
+def _as_carol(monkeypatch):
+    monkeypatch.setattr(main_mod, "current_user", lambda s: UserInfo(CAROL, "c@x.org", "Carol", CAROL_GROUPS))
+
+
+def _admin_csrf(client):
+    return __import__("re").search(
+        r'name="csrf_token" value="([^"]+)"', client.get("/admin").text
+    ).group(1)
+
+
+def test_admin_approves_pending_into_any_site(app, client, settings, monkeypatch):
+    _seed(settings)
+    seed_pending(settings, "shoveler-pend1")
+    _as_carol(monkeypatch)
+    page = client.get("/admin").text
+    assert "Awaiting approval (1)" in page and "shoveler-pend1" in page
+    # Known sites are offered as suggestions.
+    assert '<option value="nebraska">' in page and '<option value="wisconsin">' in page
+
+    resp = client.post(
+        "/pending/shoveler-pend1/approve",
+        data={"site": "  brand-new-site ", "csrf_token": _admin_csrf(client), "return_to": "/admin"},
+    )
+    assert resp.url.path == "/admin"
+    assert "Approved shoveler-pend1 for brand-new-site." in resp.text
+    conn = db.connect(settings.db_path)
+    try:
+        row = db.get_client(conn, "shoveler-pend1")
+        assert (row["pending"], row["site"], row["owner_sub"]) == (0, "brand-new-site", CAROL)
+    finally:
+        conn.close()
+
+
+def test_admin_approval_needs_a_site(app, client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    _as_carol(monkeypatch)
+    resp = client.post(
+        "/pending/shoveler-pend1/approve",
+        data={"site": "   ", "csrf_token": _admin_csrf(client), "return_to": "/admin"},
+    )
+    assert "You may not approve into that site." in resp.text
+
+
+def test_return_to_is_not_an_open_redirect(app, client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    _as_carol(monkeypatch)
+    resp = client.post(
+        "/pending/shoveler-pend1/reject",
+        data={"csrf_token": _admin_csrf(client), "return_to": "https://evil.example/"},
+        follow_redirects=False,
+    )
+    assert resp.headers["location"] == "/dashboard"
+

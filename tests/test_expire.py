@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from helpers import seed_client
+from helpers import seed_client, seed_pending
 from portal import db, expire
 
 
@@ -103,3 +103,24 @@ def test_reenable_recovers_idle_client(settings):
         assert row["disabled_reason"] is None
     finally:
         conn.close()
+
+
+def test_pending_clients_are_not_idle_disabled_but_purged(settings):
+    seed_pending(settings, "shoveler-pend-old")
+    seed_pending(settings, "shoveler-pend-new", key=__import__("helpers").new_key())
+    conn = db.connect(settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE clients SET created_at = ? WHERE client_id = ?",
+            (_iso(40), "shoveler-pend-old"),
+        )
+        # Idle-expiry leaves pending clients alone (they have no site to idle in)...
+        assert expire.find_and_disable_idle(conn, settings.idle_days) == []
+        # ...the pending TTL removes the ones nobody approved.
+        assert expire.purge_stale_pending(conn, settings.pending_client_ttl_seconds) == [
+            "shoveler-pend-old"
+        ]
+        assert db.get_client(conn, "shoveler-pend-new")["pending"] == 1
+    finally:
+        conn.close()
+

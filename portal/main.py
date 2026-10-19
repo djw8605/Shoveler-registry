@@ -160,6 +160,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         try:
             rows = db.list_clients_for_sites(conn, sites)
             token_rows = db.list_registration_tokens_for_sites(conn, sites)
+            pending = [_pending_view(r) for r in db.list_pending_clients(conn)]
         finally:
             conn.close()
         by_site = {site: [] for site in sites}
@@ -174,6 +175,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             sites=sites,
             by_site=by_site,
             tokens_by_site=tokens_by_site,
+            pending=pending,
         )
 
     @app.get("/admin", response_class=HTMLResponse)
@@ -187,13 +189,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         conn = db.connect(settings.db_path)
         try:
             rows = db.list_all_clients(conn)
+            pending = [_pending_view(r) for r in db.list_pending_clients(conn)]
+            known_sites = db.list_known_sites(conn)
         finally:
             conn.close()
         clients = [
             dict(_client_view(row, settings.idle_days), owner_email=row["owner_email"])
             for row in rows
         ]
-        return render(request, "admin.html", clients=clients)
+        return render(
+            request,
+            "admin.html",
+            clients=clients,
+            pending=pending,
+            known_sites=known_sites,
+        )
 
     @app.post("/admin/{client_id}/disable")
     def admin_disable(
@@ -218,6 +228,85 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             conn.close()
         _flash(request.session, f"Credential {client_id} disabled.", "info")
         return RedirectResponse("/admin", status_code=303)
+
+    @app.post("/pending/{client_id}/approve")
+    def pending_approve(
+        request: Request,
+        client_id: str,
+        site: str = Form(...),
+        csrf_token: str = Form(...),
+        return_to: str = Form("/dashboard"),
+    ):
+        user = current_user(request.session)
+        if not user:
+            return RedirectResponse("/", status_code=303)
+        back = _return_to(return_to)
+        if not _check_csrf(request.session, csrf_token):
+            _flash(request.session, "Invalid CSRF token.", "error")
+            return RedirectResponse(back, status_code=303)
+        site = site.strip()
+        is_admin = authz.is_registry_admin(settings.registry_admin_group, user.groups)
+        # Site managers approve into their own sites; registry admins into any.
+        allowed = bool(site) and len(site) <= SITE_MAX_LEN and (
+            is_admin
+            or authz.may_manage_site(
+                user.groups,
+                settings.comanage_group_prefix,
+                site,
+                admin_group=settings.registry_admin_group,
+            )
+        )
+        if not allowed:
+            _flash(request.session, "You may not approve into that site.", "error")
+            return RedirectResponse(back, status_code=303)
+        conn = db.connect(settings.db_path)
+        try:
+            ok = db.approve_client(
+                conn, client_id, site=site, owner_sub=user.sub, owner_email=user.email
+            )
+        finally:
+            conn.close()
+        if not ok:
+            _flash(request.session, "That shoveler is no longer pending.", "error")
+        else:
+            _flash(request.session, f"Approved {client_id} for {site}.", "info")
+        return RedirectResponse(back, status_code=303)
+
+    @app.post("/pending/{client_id}/reject")
+    def pending_reject(
+        request: Request,
+        client_id: str,
+        csrf_token: str = Form(...),
+        return_to: str = Form("/dashboard"),
+    ):
+        user = current_user(request.session)
+        if not user:
+            return RedirectResponse("/", status_code=303)
+        back = _return_to(return_to)
+        if not _check_csrf(request.session, csrf_token):
+            _flash(request.session, "Invalid CSRF token.", "error")
+            return RedirectResponse(back, status_code=303)
+        # Anyone who could approve it (any site manager, or an admin) may reject.
+        if not (
+            authz.is_registry_admin(settings.registry_admin_group, user.groups)
+            or authz.sites_for_groups(
+                user.groups,
+                settings.comanage_group_prefix,
+                admin_group=settings.registry_admin_group,
+            )
+        ):
+            _flash(request.session, "Not authorized.", "error")
+            return RedirectResponse(back, status_code=303)
+        conn = db.connect(settings.db_path)
+        try:
+            ok = db.delete_pending_client(conn, client_id)
+        finally:
+            conn.close()
+        if not ok:
+            _flash(request.session, "That shoveler is no longer pending.", "error")
+        else:
+            _flash(request.session, f"Rejected {client_id}.", "info")
+        return RedirectResponse(back, status_code=303)
 
     @app.post("/registration-tokens")
     def registration_token_create(
@@ -480,6 +569,25 @@ REENABLE_REASONS = {"idle", "revoked-by-owner"}
 # shoveler's amqp.oauth.bootstrap_token_file). Its key and registration state
 # are persisted alongside, under the same directory.
 BOOTSTRAP_TOKEN_FILE = "/etc/xrootd-monitoring-shoveler/oauth/bootstrap.token"
+
+
+# Longest site name an admin may type when approving a pending shoveler.
+SITE_MAX_LEN = 100
+
+
+def _return_to(value: str) -> str:
+    # Only our own pages: never an open redirect.
+    return "/admin" if value == "/admin" else "/dashboard"
+
+
+def _pending_view(row) -> dict:
+    return {
+        "client_id": row["client_id"],
+        "client_name": row["client_name"],
+        "thumbprint": row["key_thumbprint"][:12],
+        "registered_ip": row["registered_ip"],
+        "created_at": row["created_at"],
+    }
 
 
 def _can_reenable(row) -> bool:

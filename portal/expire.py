@@ -1,11 +1,13 @@
-"""Idle-expiry job: disable credentials unused for IDLE_DAYS.
+"""Idle-expiry job: disable credentials unused for IDLE_DAYS, and delete
+pending (token-less) registrations nobody approved within
+PENDING_CLIENT_TTL_SECONDS.
 
 Run from cron or a Kubernetes CronJob:
 
     python -m portal.expire
 
 The reference time is ``last_used_at`` (or ``created_at`` if a credential was
-never used). Only currently-enabled rows are affected. Rows are never deleted
+never used). Only currently-enabled, approved rows are affected. Rows are never deleted
 (audit + recovery); recovery is self-service via the dashboard's Re-enable
 button, which clears the disabled flag. The shoveler keeps its key and
 client_id, so nothing needs to change on the shoveler side.
@@ -32,7 +34,8 @@ def find_and_disable_idle(
     disabled: list[str] = []
 
     cur = conn.execute(
-        "SELECT client_id, created_at, last_used_at FROM clients WHERE disabled = 0"
+        "SELECT client_id, created_at, last_used_at FROM clients "
+        "WHERE disabled = 0 AND pending = 0"
     )
     for row in cur.fetchall():
         ref = row["last_used_at"] or row["created_at"]
@@ -50,6 +53,19 @@ def find_and_disable_idle(
     return disabled
 
 
+def purge_stale_pending(
+    conn: sqlite3.Connection, ttl_seconds: int, now: datetime | None = None
+) -> list[str]:
+    """Delete pending clients registered more than ttl_seconds ago."""
+    now = now or datetime.now(timezone.utc)
+    deleted = db.delete_stale_pending_clients(
+        conn, db.to_iso(now - timedelta(seconds=ttl_seconds))
+    )
+    for client_id in deleted:
+        log.info("Deleted unapproved pending client %s", client_id)
+    return deleted
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -59,9 +75,14 @@ def main() -> int:
     conn = db.connect(settings.db_path)
     try:
         disabled = find_and_disable_idle(conn, settings.idle_days)
+        purged = purge_stale_pending(conn, settings.pending_client_ttl_seconds)
     finally:
         conn.close()
-    log.info("Idle-expiry complete: disabled %d client(s)", len(disabled))
+    log.info(
+        "Idle-expiry complete: disabled %d client(s), deleted %d stale pending",
+        len(disabled),
+        len(purged),
+    )
     return 0
 
 

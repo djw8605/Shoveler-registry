@@ -5,7 +5,14 @@ from __future__ import annotations
 import re
 
 import portal.main as main_mod
-from helpers import make_assertion, new_key, registration_body, seed_client, token_form
+from helpers import (
+    make_assertion,
+    new_key,
+    registration_body,
+    seed_client,
+    seed_pending,
+    token_form,
+)
 from portal import db
 from portal.auth import UserInfo
 
@@ -171,3 +178,94 @@ def test_non_manager_cannot_revoke_token(client, settings, monkeypatch):
         assert db.get_registration_token(conn, token_hash)["revoked"] == 0
     finally:
         conn.close()
+
+
+# --- Token-less registration: pending until approved -------------------------
+
+def test_tokenless_shoveler_pending_then_approved(client, settings, monkeypatch):
+    # The shoveler registers with no token...
+    key = new_key()
+    reg = client.post("/register", json=registration_body(key, client_name="shoveler@xrd9"))
+    assert reg.status_code == 201
+    cid = reg.json()["client_id"]
+    # ...and polls /token, which says it's pending.
+    assert _get_token(client, key, cid).json() == {"error": "authorization_pending"}
+
+    # A nebraska manager sees it awaiting approval and approves it into nebraska.
+    _login(monkeypatch)
+    dash = client.get("/dashboard").text
+    assert "Awaiting approval (1)" in dash and cid in dash and "shoveler@xrd9" in dash
+    csrf = _csrf(client)
+    resp = client.post(f"/pending/{cid}/approve", data={"site": "nebraska", "csrf_token": csrf})
+    assert f"Approved {cid} for nebraska." in resp.text
+    assert "Awaiting approval" not in resp.text
+
+    # Tokens flow, and the approver owns it (so may disable it).
+    assert _get_token(client, key, cid).status_code == 200
+    conn = db.connect(settings.db_path)
+    try:
+        row = db.get_client(conn, cid)
+        assert (row["pending"], row["site"], row["owner_sub"]) == (0, "nebraska", ALICE)
+    finally:
+        conn.close()
+    client.post(f"/credentials/{cid}/disable", data={"csrf_token": csrf})
+    assert _get_token(client, key, cid).status_code == 401
+
+
+def test_cannot_approve_into_unmanaged_site(client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    _login(monkeypatch)  # nebraska only
+    csrf = _csrf(client)
+    resp = client.post("/pending/shoveler-pend1/approve", data={"site": "wisconsin", "csrf_token": csrf})
+    assert "You may not approve into that site." in resp.text
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.get_client(conn, "shoveler-pend1")["pending"] == 1
+    finally:
+        conn.close()
+
+
+def test_approve_requires_csrf(client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    _login(monkeypatch)
+    _csrf(client)
+    resp = client.post("/pending/shoveler-pend1/approve", data={"site": "nebraska", "csrf_token": "bad"})
+    assert "Invalid CSRF token." in resp.text
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.get_client(conn, "shoveler-pend1")["pending"] == 1
+    finally:
+        conn.close()
+
+
+def test_reject_deletes_pending_client(client, settings, monkeypatch):
+    key = seed_pending(settings, "shoveler-pend1", key=new_key())
+    _login(monkeypatch)
+    csrf = _csrf(client)
+    resp = client.post("/pending/shoveler-pend1/reject", data={"csrf_token": csrf})
+    assert "Rejected shoveler-pend1." in resp.text
+    assert _get_token(client, key, "shoveler-pend1").status_code == 401
+
+
+def test_user_without_sites_cannot_reject(client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    _login(monkeypatch)
+    csrf = _csrf(client)  # a valid session CSRF token, so only authz can refuse
+    _login(monkeypatch, sub="nobody", groups=("CO:members:active",))
+    resp = client.post("/pending/shoveler-pend1/reject", data={"csrf_token": csrf})
+    assert "Not authorized." in resp.text
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.get_client(conn, "shoveler-pend1") is not None
+    finally:
+        conn.close()
+
+
+def test_approved_twice_is_harmless(client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    _login(monkeypatch)
+    csrf = _csrf(client)
+    client.post("/pending/shoveler-pend1/approve", data={"site": "nebraska", "csrf_token": csrf})
+    resp = client.post("/pending/shoveler-pend1/approve", data={"site": "nebraska", "csrf_token": csrf})
+    assert "That shoveler is no longer pending." in resp.text
+
