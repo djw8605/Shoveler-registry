@@ -19,12 +19,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-# Install Python dependencies first for better layer caching.
+# Install Python dependencies first for better layer caching. pyproject.toml is
+# the single source of truth; read its dependency list so the two can't drift.
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir \
-        "fastapi>=0.110" "uvicorn[standard]>=0.29" "jinja2>=3.1" \
-        "python-multipart>=0.0.9" "itsdangerous>=2.1" "httpx>=0.27" \
-        "pyjwt[crypto]>=2.8" "cryptography>=42.0" "argon2-cffi>=23.1" "pyyaml>=6.0"
+RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['project']['dependencies']))" \
+        > /tmp/requirements.txt && \
+    pip install --no-cache-dir -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
 
 # Application code.
 COPY portal/ ./portal/
