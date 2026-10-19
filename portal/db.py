@@ -16,8 +16,10 @@ from typing import Iterable, Optional
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS clients (
     client_id       TEXT PRIMARY KEY,
-    site            TEXT NOT NULL,
-    owner_sub       TEXT NOT NULL,
+    -- site/owner are NULL while pending: a shoveler that registered without a
+    -- token gets them when a site manager or registry admin approves it.
+    site            TEXT,
+    owner_sub       TEXT,
     owner_email     TEXT,
     client_name     TEXT,
     public_jwk      TEXT NOT NULL,
@@ -26,9 +28,12 @@ CREATE TABLE IF NOT EXISTS clients (
     created_at      TEXT NOT NULL,
     last_used_at    TEXT,
     disabled        INTEGER NOT NULL DEFAULT 0,
-    disabled_reason TEXT
+    disabled_reason TEXT,
+    pending         INTEGER NOT NULL DEFAULT 0,
+    registered_ip   TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_clients_site ON clients(site);
+CREATE INDEX IF NOT EXISTS idx_clients_thumbprint ON clients(key_thumbprint);
 
 CREATE TABLE IF NOT EXISTS registration_tokens (
     token_hash  TEXT PRIMARY KEY,
@@ -96,11 +101,11 @@ def init_db(db_path: str) -> None:
     conn = connect(db_path)
     try:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(clients)")}
-        if "secret_hash" in cols:
+        if cols and ("secret_hash" in cols or "pending" not in cols):
             # CREATE TABLE IF NOT EXISTS would silently keep the old table.
             raise RuntimeError(
-                f"{db_path} has the old client-secret schema; there is no "
-                "migration. Move it aside and restart to create a fresh database."
+                f"{db_path} has an old clients schema; there is no migration. "
+                "Move it aside and restart to create a fresh database."
             )
         conn.executescript(SCHEMA)
     finally:
@@ -130,11 +135,106 @@ def list_clients_for_sites(
 
 
 def list_all_clients(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """Every client across all sites (registry-admin view)."""
+    """Every approved client across all sites (registry-admin view)."""
     cur = conn.execute(
-        "SELECT * FROM clients ORDER BY site, last_used_at DESC, created_at DESC"
+        "SELECT * FROM clients WHERE pending = 0 "
+        "ORDER BY site, last_used_at DESC, created_at DESC"
     )
     return cur.fetchall()
+
+
+def list_known_sites(conn: sqlite3.Connection) -> list[str]:
+    """Sites that have at least one client (suggestions for admin approval)."""
+    cur = conn.execute(
+        "SELECT DISTINCT site FROM clients WHERE site IS NOT NULL ORDER BY site"
+    )
+    return [r["site"] for r in cur.fetchall()]
+
+
+def find_client_by_thumbprint(
+    conn: sqlite3.Connection, key_thumbprint: str
+) -> Optional[sqlite3.Row]:
+    """The most recently registered client with this public key, if any."""
+    cur = conn.execute(
+        "SELECT * FROM clients WHERE key_thumbprint = ? "
+        "ORDER BY created_at DESC LIMIT 1",
+        (key_thumbprint,),
+    )
+    return cur.fetchone()
+
+
+# --- Pending clients (registered without a token) ------------------------
+
+def insert_pending_client(
+    conn: sqlite3.Connection,
+    *,
+    client_id: str,
+    client_name: Optional[str],
+    public_jwk: str,
+    kid: str,
+    key_thumbprint: str,
+    registered_ip: Optional[str],
+) -> None:
+    conn.execute(
+        """INSERT INTO clients
+           (client_id, client_name, public_jwk, kid, key_thumbprint,
+            created_at, pending, registered_ip)
+           VALUES (?, ?, ?, ?, ?, ?, 1, ?)""",
+        (client_id, client_name, public_jwk, kid, key_thumbprint, utcnow_iso(),
+         registered_ip),
+    )
+
+
+def count_pending_clients(conn: sqlite3.Connection) -> int:
+    return conn.execute("SELECT COUNT(*) FROM clients WHERE pending = 1").fetchone()[0]
+
+
+def list_pending_clients(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    cur = conn.execute(
+        "SELECT * FROM clients WHERE pending = 1 ORDER BY created_at DESC"
+    )
+    return cur.fetchall()
+
+
+def approve_client(
+    conn: sqlite3.Connection,
+    client_id: str,
+    *,
+    site: str,
+    owner_sub: str,
+    owner_email: Optional[str],
+) -> bool:
+    """Bind a pending client to a site; the approver becomes its owner.
+
+    Returns False if the client isn't pending (already approved or rejected).
+    """
+    cur = conn.execute(
+        """UPDATE clients SET pending = 0, site = ?, owner_sub = ?, owner_email = ?
+           WHERE client_id = ? AND pending = 1""",
+        (site, owner_sub, owner_email, client_id),
+    )
+    return cur.rowcount == 1
+
+
+def delete_pending_client(conn: sqlite3.Connection, client_id: str) -> bool:
+    """Reject a pending client. It never had access, so nothing is kept."""
+    cur = conn.execute(
+        "DELETE FROM clients WHERE client_id = ? AND pending = 1", (client_id,)
+    )
+    return cur.rowcount == 1
+
+
+def delete_stale_pending_clients(conn: sqlite3.Connection, before: str) -> list[str]:
+    """Delete pending clients registered before ``before``; returns their ids."""
+    cur = conn.execute(
+        "SELECT client_id FROM clients WHERE pending = 1 AND created_at < ?",
+        (before,),
+    )
+    ids = [r["client_id"] for r in cur.fetchall()]
+    conn.execute(
+        "DELETE FROM clients WHERE pending = 1 AND created_at < ?", (before,)
+    )
+    return ids
 
 
 def disable_client(conn: sqlite3.Connection, client_id: str, reason: str) -> None:
