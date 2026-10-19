@@ -11,11 +11,12 @@ Python.
 It does four things:
 
 1. **Self-service portal** (browser, CILogon login) — operators create one-time
-   **registration tokens** for their site, and disable / re-enable the shovelers
-   registered with them.
-2. **Registration endpoint** (`POST /register`) — a shoveler presents a
-   registration token and its **public key** (RFC 7591 request format) and gets
-   a `client_id` bound to that site.
+   **registration tokens** for their site, **approve** shovelers that registered
+   without one, and disable / re-enable the shovelers of their sites.
+2. **Registration endpoint** (`POST /register`) — a shoveler sends its **public
+   key** (RFC 7591 request format). With a registration token it gets a
+   `client_id` bound to that site at once; without one it waits as **pending**
+   until a site manager or registry admin approves it and picks its site.
 3. **Token endpoint** (`POST /token`) — OAuth2 `client_credentials` grant,
    authenticated with a JWT signed by the shoveler's private key
    (`private_key_jwt`, RFC 7523) → signed access token. The **JWKS endpoint**
@@ -84,6 +85,9 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `REGISTRATION_TOKEN_TTL_SECONDS` | `259200` | Lifetime of a one-time registration token (72h) |
 | `REGISTER_RATE_LIMIT` / `REGISTER_RATE_WINDOW` | `10` / `60` | Per-client-IP `/register` rate limit |
 | `ASSERTION_MAX_LIFETIME_SECONDS` | `300` | Reject client assertions whose `exp` is further out than this |
+| `ALLOW_PENDING_REGISTRATION` | `true` | Accept token-less registrations as pending (`false`: a token is required) |
+| `MAX_PENDING_CLIENTS` | `100` | Most pending registrations at once; more get `503` |
+| `PENDING_CLIENT_TTL_SECONDS` | `604800` | Unapproved pending registrations are deleted after this (7 days) |
 
 ## CILogon client registration
 
@@ -135,8 +139,9 @@ sites (site, `client_id`, name, key thumbprint, owner email, status, created,
 last_used). It makes idle/dead sites easy to scan. Admins may also disable any
 client (`disabled_reason='revoked-by-admin'`). The owner can't re-enable an
 admin-disabled client, since it may have a compromised key: recovery is a new
-registration token. Leave `REGISTRY_ADMIN_GROUP` empty to disable the admin
-view entirely.
+registration token. Admins also see shovelers awaiting approval and may
+approve one into **any** site (typed in, with known sites suggested) or reject
+it. Leave `REGISTRY_ADMIN_GROUP` empty to disable the admin view entirely.
 
 ## Local development
 
@@ -162,15 +167,22 @@ Run the tests with `pytest`.
 
 ## Registration and token endpoints
 
-### `POST /register` (one-time registration)
+### `POST /register`
 
-The shoveler generates an RSA keypair locally and registers the **public** key,
-presenting a registration token from the dashboard as a bearer token:
+The shoveler generates an RSA keypair locally and registers the **public** key.
+There are two ways:
+
+- **With a registration token** (bearer token from the dashboard): the client
+  is active immediately, bound to the token's site.
+- **Without a token** (no `Authorization` header at all): the client is
+  **pending**, with no site. It can't get access tokens until a site manager
+  approves it into one of their sites, or a registry admin into any site, on
+  the dashboard. The approver becomes its owner. Rejecting it deletes it.
 
 ```http
 POST /register
 Content-Type: application/json
-Authorization: Bearer <registration token>
+Authorization: Bearer <registration token>      # omit for a pending registration
 
 {"client_name": "xrootd-01.example.edu",
  "grant_types": ["client_credentials"],
@@ -182,17 +194,21 @@ Authorization: Bearer <registration token>
 `201` returns `client_id`, `client_id_issued_at`, `client_name`, `grant_types`
 and `token_endpoint_auth_method`. No `registration_access_token` is issued
 (RFC 7592 client management is not offered), so no long-lived management
-credential exists. The client is active immediately: being minted by a member
-of `<COMANAGE_GROUP_PREFIX><site>` is the approval, and the client gets the
-normal `SCOPE_VALUE` (any requested scope is ignored).
+credential exists. Every client gets the normal `SCOPE_VALUE` (any requested
+scope is ignored).
 
+With a token:
+
+- Being minted by a member of `<COMANAGE_GROUP_PREFIX><site>` is the approval,
+  so the client is active immediately.
 - The token is **single-use** and expires after `REGISTRATION_TOKEN_TTL_SECONDS`.
-  Until it is used, **any** manager of its site (not only its creator) can
-  revoke it on the dashboard.
   Spending it and creating the client happen in one transaction, so of two
-  concurrent uses exactly one succeeds.
-- A missing, unknown, expired, revoked or already-used token gets
-  `401 {"error":"invalid_token"}` with `WWW-Authenticate: Bearer error="invalid_token"`.
+  concurrent uses exactly one succeeds. Until it is used, **any** manager of
+  its site (not only its creator) can revoke it on the dashboard.
+- An unknown, expired, revoked or already-used token, or any `Authorization`
+  header that isn't `Bearer <token>`, gets `401 {"error":"invalid_token"}` with
+  `WWW-Authenticate: Bearer error="invalid_token"`. A bad token never falls back
+  to a pending registration.
 - **Retry is idempotent:** if the response was lost, presenting the same (used,
   unexpired) token with the **same key** returns the same `client_id`. A
   different key gets `401`.
@@ -202,7 +218,21 @@ normal `SCOPE_VALUE` (any requested scope is ignored).
   private members**. `jwks_uri` is not supported. Violations get
   `400 {"error":"invalid_client_metadata","error_description":...}` and do not
   spend the token. Unknown fields (e.g. `software_version`) are ignored.
-- Rate-limited per client IP (`429` with `Retry-After`).
+
+Without a token (pending):
+
+- Allowed while `ALLOW_PENDING_REGISTRATION` is on (the default); otherwise a
+  missing token is `401 invalid_token`.
+- Registering again with the **same key** returns the same `client_id`.
+- At most `MAX_PENDING_CLIENTS` may wait at once; beyond that the registry
+  answers `503 {"error":"temporarily_unavailable"}` with `Retry-After`.
+- The dashboard lists pending shovelers with their `client_id`, name, key
+  thumbprint, source IP and time. The shoveler logs its `client_id` when it
+  registers, so the approver can match the two before approving.
+- Pending registrations nobody approves within `PENDING_CLIENT_TTL_SECONDS`
+  are deleted by the nightly expire job.
+
+Both modes are rate-limited per client IP (`429` with `Retry-After`).
 
 ### `POST /token` (`private_key_jwt`)
 
@@ -223,7 +253,9 @@ doesn't matter), `iat`, `exp` and a unique `jti`. Only RS256 is accepted;
 ahead is refused; each `jti` is accepted once per client.
 
 On success it returns `{"access_token", "token_type":"Bearer", "expires_in"}`
-and updates the client's `last_used_at`. Any authentication failure (unknown or
+and updates the client's `last_used_at`. A **pending** client whose assertion
+verifies gets `400 {"error":"authorization_pending"}` instead; the shoveler
+keeps polling until it is approved. Any authentication failure (unknown or
 disabled client, bad signature or `kid`, wrong `aud`, expired, too long-lived or
 replayed assertion) returns a uniform `401 {"error":"invalid_client"}`. Requests
 that exceed the per-`client_id` rate limit get `429` with a `Retry-After`
@@ -287,11 +319,19 @@ shoveler runs as. On first start the shoveler generates its key, registers, and
 starts writing access tokens to `amqp.token_location`. After that first
 successful start the token file can be deleted.
 
+**Without a token:** configure only `enabled`, `token_url` and
+`registration_url` and start the shoveler. It registers as pending, logs its
+`client_id`, queues data on disk and polls. Find that `client_id` under
+**Awaiting approval** on the dashboard, check it against the shoveler's log,
+and approve it into your site; the shoveler starts sending within a minute.
+(This needs a shoveler that can start without a bootstrap token and omits the
+`Authorization` header when it has none.)
+
 The shoveler persists its private key and `client_id` under
 `/etc/xrootd-monitoring-shoveler/oauth/`. **That directory must survive
 restarts and redeploys** (e.g. a persistent volume for a containerised
-shoveler). If it is lost, create a new registration token; the old client can
-be disabled on the dashboard.
+shoveler). If it is lost, register again (with a new registration token, or
+without one and approve it); the old client can be disabled on the dashboard.
 
 ## Signing keys & rotation
 
@@ -328,8 +368,9 @@ logs in and clicks **Re-enable**, which clears the disabled flag; the shoveler
 keeps its key and `client_id`, so nothing changes on its side. Owners can also
 re-enable clients they disabled themselves, but **not** ones a registry admin
 disabled (`revoked-by-admin`): that may mean a compromised key, so recovery is
-a new registration token (a new client and key). Deploy it via
-[`k8s/cronjob.yaml`](./k8s/cronjob.yaml) or cron.
+a new registration token (a new client and key). The same job deletes pending
+registrations nobody approved within `PENDING_CLIENT_TTL_SECONDS`. Deploy it
+via [`k8s/cronjob.yaml`](./k8s/cronjob.yaml) or cron.
 
 ## Docker
 
@@ -421,5 +462,10 @@ Notes:
 - CSRF tokens protect all browser POSTs; destructive actions confirm first.
 - Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` when
   `PORTAL_BASE_URL` is https.
+- Token-less registration only creates a **pending** client with no site and
+  no access; a human who manages a site (or a registry admin) must approve it.
+  It is capped (`MAX_PENDING_CLIENTS`), expires, and can be turned off
+  (`ALLOW_PENDING_REGISTRATION=false`). `/token` reveals pending status only to
+  the holder of the registered private key.
 - Rate limits: per-`client_id` on `/token`, per-IP on `/register`. No
   registration token, client assertion or access token is ever logged.

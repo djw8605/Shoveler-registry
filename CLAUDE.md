@@ -6,9 +6,10 @@ Guidance for working in this repo. Keep it current when conventions change.
 
 A small, self-contained **OAuth2 token issuer** for the
 `xrootd-monitoring-shoveler` (replaces a Keycloak deployment). Site operators
-log in with CILogon and mint a one-time registration token for their site.
+log in with CILogon and either mint a one-time registration token for their
+site or approve a shoveler that registered without one (it waits as pending).
 The shoveler generates its own RSA key, registers the public key at
-`/register` with that token, then authenticates at `/token` with a JWT signed
+`/register`, then authenticates at `/token` with a JWT signed
 by its private key (`private_key_jwt`) to fetch short-lived RS256 JWTs that
 RabbitMQ validates against this service's published JWKS. No shared secret.
 
@@ -79,6 +80,12 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - **`/register`:** every bad token is the same `401 invalid_token`; bad
   metadata is `400 invalid_client_metadata` and must NOT spend the token. No
   `registration_access_token` (RFC 7592 is out of scope).
+- **Pending (token-less) registration:** only when there is NO Authorization
+  header (a present-but-bad token is always 401, never pending). Pending
+  clients have NULL site/owner, get `400 authorization_pending` at `/token`
+  only AFTER their assertion verifies, are kept out of site/admin client lists
+  and idle-expiry, and are capped and purged. Site managers approve into
+  their own sites, registry admins into any; the approver becomes the owner.
 - **Revoking registration tokens:** any manager of the token's site may revoke
   a pending one (not owner-only, unlike client Disable/Re-enable).
 - **Re-enable:** owners may re-enable `idle` / `revoked-by-owner` clients, never
@@ -100,6 +107,8 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   thread through `create_app`. Don't read `os.environ` elsewhere.
 - **DB access:** open a connection with `db.connect(...)`, do work in
   `try/finally: conn.close()`. Add new SQL as functions in `db.py`, not inline.
+  Clients with `pending = 1` have no site: filter them out of anything that
+  treats clients as belonging to a site.
 
 ## CSS / templates
 
@@ -118,7 +127,7 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   `base_url="https://testserver"` so the **Secure** session cookie is sent back.
 - `tests/helpers.py` (imported as `helpers`) generates shoveler RSA keys, JWKs,
   Go-client-shaped assertions, and seeds tokens/clients (`seed_token`,
-  `seed_client`). Use it rather than inserting rows by hand.
+  `seed_client`, `seed_pending`). Use it rather than inserting rows by hand.
 - For routes needing a logged-in user, monkeypatch `portal.main.current_user`
   to return a `UserInfo` with the right `groups` (e.g. `("shoveler-nebraska",)`);
   it's resolved as a module global at call time. CSRF token is scraped from a
