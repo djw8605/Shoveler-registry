@@ -6,6 +6,11 @@ metadata:
     app: shoveler-auth-portal
 spec:
   replicas: 1 # SQLite + on-disk keys: keep a single writer. Scale via a shared RWX volume only if you understand the implications.
+  # Stop the old pod before starting the new one: the data PVC is
+  # ReadWriteOnce (a rolling update can stall on Multi-Attach if the new pod
+  # lands on another node), and SQLite must never have two writers.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: shoveler-auth-portal

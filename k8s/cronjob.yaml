@@ -12,9 +12,23 @@ spec:
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
+      # Give up if the pod can't schedule (e.g. portal pod down) so a stuck
+      # run doesn't block later ones under concurrencyPolicy: Forbid.
+      activeDeadlineSeconds: 3600
       template:
         spec:
           restartPolicy: Never
+          # The data PVC is ReadWriteOnce, so this pod must run on the same
+          # node as the portal pod or it will hang on Multi-Attach. Do NOT give
+          # this pod the app=shoveler-auth-portal label: the Service and the
+          # Deployment select on it.
+          affinity:
+            podAffinity:
+              requiredDuringSchedulingIgnoredDuringExecution:
+                - labelSelector:
+                    matchLabels:
+                      app: shoveler-auth-portal
+                  topologyKey: kubernetes.io/hostname
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
