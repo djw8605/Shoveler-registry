@@ -2,29 +2,36 @@
 
 A small, self-contained OAuth2 token issuer for the
 [`xrootd-monitoring-shoveler`](https://github.com/opensciencegrid/xrootd-monitoring-shoveler).
-It lets site operators **self-provision credentials** for the shoveler and
-mints the short-lived JWTs that RabbitMQ validates against this service's
-published public keys. It replaces a Keycloak deployment with a few hundred
-lines of Python.
+It lets site operators **onboard shovelers themselves** and mints the
+short-lived JWTs that RabbitMQ validates against this service's published
+public keys. Shovelers hold their own RSA key; **no shared secret exists
+anywhere**. It replaces a Keycloak deployment with a few hundred lines of
+Python.
 
 It does four things:
 
-1. **Self-service portal** (browser, CILogon login) — operators create / recreate
-   / disable a `client_id` + `client_secret` for their site.
-2. **Token endpoint** (`POST /token`) — OAuth2 `client_credentials` grant → signed JWT.
-3. **JWKS endpoint** (`GET /.well-known/jwks.json`) — RabbitMQ fetches public keys here.
-4. **Idle-expiry job** — disables credentials unused for `IDLE_DAYS`.
+1. **Self-service portal** (browser, CILogon login) — operators create one-time
+   **registration tokens** for their site, and disable / re-enable the shovelers
+   registered with them.
+2. **Registration endpoint** (`POST /register`) — a shoveler presents a
+   registration token and its **public key** (RFC 7591 request format) and gets
+   a `client_id` bound to that site.
+3. **Token endpoint** (`POST /token`) — OAuth2 `client_credentials` grant,
+   authenticated with a JWT signed by the shoveler's private key
+   (`private_key_jwt`, RFC 7523) → signed access token. The **JWKS endpoint**
+   (`GET /.well-known/jwks.json`) publishes the keys RabbitMQ verifies it with.
+4. **Idle-expiry job** — disables shovelers unused for `IDLE_DAYS`.
 
 > **Two kinds of credentials — don't conflate them.**
 > The portal is itself a *confidential OIDC client of CILogon* (`CILOGON_CLIENT_ID`/
 > `CILOGON_CLIENT_SECRET`), which it uses to log humans in. That is entirely
-> separate from the shoveler `client_id`/`client_secret` pairs that this service
-> *issues* to sites.
+> separate from the shoveler clients this service *issues* to sites, which
+> authenticate with their own keys, not secrets.
 
 ## Stack
 
 Python 3.12 · FastAPI · Uvicorn · stdlib `sqlite3` (WAL) · PyJWT + `cryptography`
-for signing · `argon2-cffi` for secret hashing · httpx for the CILogon OIDC flow ·
+for signing and client-assertion verification · httpx for the CILogon OIDC flow ·
 Jinja2 templates · Tailwind CSS (compiled via the Tailwind CLI, **not** the Play CDN).
 
 ## Layout
@@ -34,12 +41,13 @@ portal/
   config.py     env-driven settings
   db.py         sqlite schema + queries (WAL)
   keys.py       key gen/load, JWKS, rotation CLI
-  tokens.py     /token logic, claim building, argon2, rate limiting
+  registration.py  /register: registration tokens, client metadata validation
+  tokens.py     /token private_key_jwt verification, claim building, rate limiting
   authz.py      COmanage group-based site authorization
   auth.py       CILogon OIDC relying-party flow + session (captures isMemberOf)
   main.py       FastAPI app, routes, middleware, CSRF
   expire.py     idle-expiry subcommand
-  templates/    base, macros, login, dashboard, secret_once, not_authorized
+  templates/    base, macros, login, dashboard, registration_token, not_authorized, admin
   static/css/   compiled app.css (build artifact)
 assets/app.css  Tailwind source (source of truth)
 tailwind.config.js, package.json
@@ -73,6 +81,9 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `ADMIN_CONTACT` | _generic_ | Shown on the not-authorized page |
 | `REGISTRY_ADMIN_GROUP` | _empty_ | COmanage group whose members are registry-wide admins |
 | `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW` | `30` / `60` | Per-`client_id` `/token` rate limit |
+| `REGISTRATION_TOKEN_TTL_SECONDS` | `259200` | Lifetime of a one-time registration token (72h) |
+| `REGISTER_RATE_LIMIT` / `REGISTER_RATE_WINDOW` | `10` / `60` | Per-client-IP `/register` rate limit |
+| `ASSERTION_MAX_LIFETIME_SECONDS` | `300` | Reject client assertions whose `exp` is further out than this |
 
 ## CILogon client registration
 
@@ -116,12 +127,13 @@ who is in no site group sees a friendly "not yet authorized; contact
 
 Site operators see only their own sites. Members of the COmanage group named in
 `REGISTRY_ADMIN_GROUP` are **registry-wide admins**: they get an **Admin** link
-to `GET /admin`, a read-only table of *every* credential across *all* sites
-(site, `client_id`, owner email, status, created, last_used). It makes
-idle/dead sites easy to scan. Admins may also disable any credential
-(`disabled_reason='revoked-by-admin'`); recovery is still self-service via the
-owner's Recreate. Leave `REGISTRY_ADMIN_GROUP` empty to disable the admin view
-entirely.
+to `GET /admin`, a read-only table of *every* registered shoveler across *all*
+sites (site, `client_id`, name, key thumbprint, owner email, status, created,
+last_used). It makes idle/dead sites easy to scan. Admins may also disable any
+client (`disabled_reason='revoked-by-admin'`). The owner can't re-enable an
+admin-disabled client, since it may have a compromised key: recovery is a new
+registration token. Leave `REGISTRY_ADMIN_GROUP` empty to disable the admin
+view entirely.
 
 ## Local development
 
@@ -145,18 +157,74 @@ uvicorn --factory portal.main:create_app --reload --port 8080
 
 Run the tests with `pytest`.
 
-## Token / JWT details
+## Registration and token endpoints
 
-`POST /token` accepts a form-encoded `client_credentials` grant (or HTTP Basic
-per RFC 6749). On success it returns
-`{"access_token", "token_type":"Bearer", "expires_in"}` and updates the
-credential's `last_used_at`. Any authentication failure (unknown id, disabled,
-or wrong secret) returns a uniform `401 {"error":"invalid_client"}` — the secret
-check is constant-time and never reveals which of id/secret was wrong. Requests
-that exceed the per-`client_id` rate limit instead get `429` with a `Retry-After`
-header (a throttling signal, distinct from the auth-failure response).
+### `POST /register` (one-time registration)
 
-The minted RS256 JWT (header carries `kid`) has claims:
+The shoveler generates an RSA keypair locally and registers the **public** key,
+presenting a registration token from the dashboard as a bearer token:
+
+```http
+POST /register
+Content-Type: application/json
+Authorization: Bearer <registration token>
+
+{"client_name": "xrootd-01.example.edu",
+ "grant_types": ["client_credentials"],
+ "token_endpoint_auth_method": "private_key_jwt",
+ "jwks": {"keys": [{"kty": "RSA", "use": "sig", "alg": "RS256",
+                    "kid": "<kid>", "n": "...", "e": "AQAB"}]}}
+```
+
+`201` returns `client_id`, `client_id_issued_at`, `client_name`, `grant_types`
+and `token_endpoint_auth_method`. No `registration_access_token` is issued
+(RFC 7592 client management is not offered), so no long-lived management
+credential exists. The client is active immediately: being minted by a member
+of `<COMANAGE_GROUP_PREFIX><site>` is the approval, and the client gets the
+normal `SCOPE_VALUE` (any requested scope is ignored).
+
+- The token is **single-use** and expires after `REGISTRATION_TOKEN_TTL_SECONDS`.
+  Spending it and creating the client happen in one transaction, so of two
+  concurrent uses exactly one succeeds.
+- A missing, unknown, expired, revoked or already-used token gets
+  `401 {"error":"invalid_token"}` with `WWW-Authenticate: Bearer error="invalid_token"`.
+- **Retry is idempotent:** if the response was lost, presenting the same (used,
+  unexpired) token with the **same key** returns the same `client_id`. A
+  different key gets `401`.
+- Metadata must use `private_key_jwt`, `grant_types` (if present) exactly
+  `["client_credentials"]`, and exactly one RSA key with a non-empty `kid`, at
+  least 2048 bits, `use` absent or `sig`, `alg` absent or `RS256`, and **no
+  private members**. `jwks_uri` is not supported. Violations get
+  `400 {"error":"invalid_client_metadata","error_description":...}` and do not
+  spend the token. Unknown fields (e.g. `software_version`) are ignored.
+- Rate-limited per client IP (`429` with `Retry-After`).
+
+### `POST /token` (`private_key_jwt`)
+
+```http
+POST /token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=client_credentials
+&client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+&client_assertion=<RS256 JWT signed with the registered private key>
+```
+
+The client assertion's header carries the registered `kid`; its claims are
+`iss = sub = client_id`, `aud` = the token URL (`PORTAL_BASE_URL/token`, the
+`TOKEN_ISSUER` base + `/token`, or `TOKEN_ISSUER`; a trailing slash on the base
+doesn't matter), `iat`, `exp` and a unique `jti`. Only RS256 is accepted;
+`exp`/`iat` get 60s leeway; an `exp` more than `ASSERTION_MAX_LIFETIME_SECONDS`
+ahead is refused; each `jti` is accepted once per client.
+
+On success it returns `{"access_token", "token_type":"Bearer", "expires_in"}`
+and updates the client's `last_used_at`. Any authentication failure (unknown or
+disabled client, bad signature or `kid`, wrong `aud`, expired, too long-lived or
+replayed assertion) returns a uniform `401 {"error":"invalid_client"}`. Requests
+that exceed the per-`client_id` rate limit get `429` with a `Retry-After`
+header. `client_secret_basic` / `client_secret_post` are not supported.
+
+The minted RS256 access token (header carries `kid`) has claims:
 
 ```
 iss = TOKEN_ISSUER
@@ -167,6 +235,11 @@ exp = now + TOKEN_TTL_SECONDS
 jti = random
 <SCOPE_CLAIM> = SCOPE_VALUE      # e.g. extra_scope = my_rabbit_server.write:*/xrd-shoveled
 ```
+
+`/.well-known/openid-configuration` advertises `token_endpoint`,
+`registration_endpoint`, `jwks_uri`, `token_endpoint_auth_methods_supported:
+["private_key_jwt"]` and `token_endpoint_auth_signing_alg_values_supported:
+["RS256"]`.
 
 ## RabbitMQ configuration
 
@@ -189,20 +262,31 @@ equal the token's `aud` **exactly**, and the permission lives in the
 
 ## Shoveler configuration
 
-After creating a credential, the one-time page shows a ready-to-paste snippet
-(adjust host/exchange to your RabbitMQ deployment):
+Requires a shoveler with OAuth self-registration support (`amqp.oauth`). On the
+dashboard, click **Create registration token** for the site. The one-time page
+shows the token and a ready-to-paste snippet (merge it into the `amqp:` section
+alongside your RabbitMQ `url` / `exchange`):
 
 ```yaml
-# xrootd-monitoring-shoveler config.yaml
-mq: amqp
 amqp:
-  url: amqps://your-rabbit-host:5671
-  exchange: shoveled
-  token:
-    client_id: "shoveler-xxxxxxxxxxxxxxxx"
-    client_secret: "<shown once>"
-    token_endpoint: "https://shoveler-auth.osg.example/token"
+  oauth:
+    enabled: true
+    token_url: https://shoveler-auth.osg.example/token
+    registration_url: https://shoveler-auth.osg.example/register
+    bootstrap_token_file: /etc/xrootd-monitoring-shoveler/oauth/bootstrap.token
+    client_name: nebraska
 ```
+
+Write the token to `bootstrap.token` with mode `0600`, readable by the user the
+shoveler runs as. On first start the shoveler generates its key, registers, and
+starts writing access tokens to `amqp.token_location`. After that first
+successful start the token file can be deleted.
+
+The shoveler persists its private key and `client_id` under
+`/etc/xrootd-monitoring-shoveler/oauth/`. **That directory must survive
+restarts and redeploys** (e.g. a persistent volume for a containerised
+shoveler). If it is lost, create a new registration token; the old client can
+be disabled on the dashboard.
 
 ## Signing keys & rotation
 
@@ -235,8 +319,12 @@ python -m portal.expire
 Disables credentials whose reference time (`last_used_at`, or `created_at` if
 never used) is older than `IDLE_DAYS`, setting `disabled_reason='idle'`. Rows
 are never deleted (audit + recovery). **Recovery is self-service:** the owner
-logs in and clicks **Recreate**, which rotates a fresh secret and clears the
-disabled flag. Deploy it via [`k8s/cronjob.yaml`](./k8s/cronjob.yaml) or cron.
+logs in and clicks **Re-enable**, which clears the disabled flag; the shoveler
+keeps its key and `client_id`, so nothing changes on its side. Owners can also
+re-enable clients they disabled themselves, but **not** ones a registry admin
+disabled (`revoked-by-admin`): that may mean a compromised key, so recovery is
+a new registration token (a new client and key). Deploy it via
+[`k8s/cronjob.yaml`](./k8s/cronjob.yaml) or cron.
 
 ## Docker
 
@@ -314,12 +402,19 @@ Notes:
 
 ## Security notes
 
-- Secrets generated with `secrets.token_urlsafe(32)`; only the argon2 hash is
-  stored; the secret is shown exactly once.
+- No shared secret between the registry and shovelers. Each shoveler's private
+  key never leaves its host; the registry stores only the public JWK, its `kid`
+  and its RFC 7638 thumbprint.
+- Registration tokens are `secrets.token_urlsafe(32)`, single-use, expiring,
+  revocable, and shown exactly once. Only their SHA-256 hash is stored (a fast
+  hash is fine for 256 random bits, and lets `/register` look them up).
+- `/token` accepts only RS256 client assertions verified against the registered
+  key, with audience, lifetime and one-time-`jti` checks, and returns a uniform
+  `invalid_client` for every failure. `/register` returns a uniform
+  `invalid_token` for every bad token.
 - Private signing keys are `0600`, never logged, never returned, never in git.
-- `/token` does a constant-time secret check and returns a uniform `invalid_client`.
 - CSRF tokens protect all browser POSTs; destructive actions confirm first.
 - Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` when
   `PORTAL_BASE_URL` is https.
-- Modest per-`client_id` rate limit on `/token`. No secret or token values are
-  ever logged.
+- Rate limits: per-`client_id` on `/token`, per-IP on `/register`. No
+  registration token, client assertion or access token is ever logged.

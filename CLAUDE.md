@@ -6,9 +6,11 @@ Guidance for working in this repo. Keep it current when conventions change.
 
 A small, self-contained **OAuth2 token issuer** for the
 `xrootd-monitoring-shoveler` (replaces a Keycloak deployment). Site operators
-log in with CILogon, self-provision a `client_id`/`client_secret` for their
-site, and the shoveler uses those at `/token` to fetch short-lived RS256 JWTs
-that RabbitMQ validates against this service's published JWKS.
+log in with CILogon and mint a one-time registration token for their site.
+The shoveler generates its own RSA key, registers the public key at
+`/register` with that token, then authenticates at `/token` with a JWT signed
+by its private key (`private_key_jwt`) to fetch short-lived RS256 JWTs that
+RabbitMQ validates against this service's published JWKS. No shared secret.
 
 Design ethos: **small and boring**. A few hundred lines across a handful of
 files, clarity over cleverness. Do not add infrastructure (Celery, Redis, an
@@ -21,12 +23,13 @@ ORM, a JS framework, the Tailwind Play CDN) — the stack is fixed (see README).
 | `config.py` | `Settings` dataclass loaded once from env via `get_settings()` (lru_cache). All env parsing lives here. |
 | `db.py` | stdlib `sqlite3` (WAL), schema init, and all SQL. No ORM. One connection per operation. |
 | `keys.py` | RSA key gen/load, JWKS, `KeyStore`, manifest-based rotation. CLI: `python -m portal.keys generate|list`. |
-| `tokens.py` | `/token` logic (`issue_token`), claim building, argon2 hashing/verify, in-process `RateLimiter`. |
+| `registration.py` | `/register` logic (`register`): bearer registration token, RFC 7591 metadata validation, idempotent retry. |
+| `tokens.py` | `/token` logic (`issue_token`): `private_key_jwt` assertion verification + replay check, claim building, registration-token generation/hashing, in-process `RateLimiter`. |
 | `authz.py` | COmanage group-based authz: `sites_for_groups`/`may_manage_site` (group `<prefix><site>` → site) + `is_registry_admin`. No file. |
 | `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
 | `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()` helper, machine endpoints. |
 | `expire.py` | Idle-expiry subcommand: `python -m portal.expire`. |
-| `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `secret_once`, `not_authorized`, `admin`. |
+| `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `registration_token`, `not_authorized`, `admin`. |
 
 ## Dev setup & commands
 
@@ -52,18 +55,32 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 ## Conventions & invariants (don't break these)
 
 - **Two credential kinds, never conflated.** `CILOGON_*` = the portal's OWN
-  OIDC client creds (logs humans in). The `client_id`/`client_secret` pairs in
-  the `clients` table = what this service ISSUES to shovelers. Keep naming
-  explicit in code and docs.
-- **Secrets:** generated with `secrets.token_urlsafe(32)`; store only the
-  argon2 hash; shown to the user exactly once. Never log a secret or a minted
-  token at any level.
+  OIDC client creds, including a client secret (logs humans in). The clients
+  in the `clients` table = what this service ISSUES to shovelers; they have
+  **keys, not secrets** (we store only their public JWK). Keep naming explicit
+  in code and docs.
+- **No shared secrets with shovelers.** Never reintroduce client secrets or
+  accept a client's private key: `/register` rejects JWKs with private members.
+- **Registration tokens:** `secrets.token_urlsafe(32)`, single-use, expiring,
+  shown exactly once. Store only the **SHA-256** hash (fast hash is deliberate:
+  256 random bits, and `/register` looks tokens up by hash; don't "upgrade" it
+  to argon2). Spend + create client atomically (`db.register_client`). Never log
+  a registration token, client assertion or minted token at any level.
 - **Signing keys:** private keys written `0600`, never logged, never returned,
   never committed (`.gitignore` covers `*.pem`, `manifest.json`, `data/`). All
   public keys (active + retired) are published in JWKS; only the newest signs.
-- **`/token`:** must return a uniform `401 {"error":"invalid_client"}` for
-  unknown id / disabled / wrong secret (constant-time; never reveal which).
-  `aud` must equal `RESOURCE_SERVER_ID` exactly — no surrounding whitespace.
+- **`/token`:** `private_key_jwt` only. Verify with `algorithms=["RS256"]`
+  ONLY (no `none`/HS256 confusion), the stored `kid`, `iss == sub ==
+  client_id`, an accepted `aud` (`Settings.token_endpoint_audiences`), required
+  `exp`/`iat`/`jti`, a capped lifetime, and a one-time `jti`. Every failure is
+  a uniform `401 {"error":"invalid_client"}` (never reveal which). Minted
+  tokens' `aud` must equal `RESOURCE_SERVER_ID` exactly — no surrounding
+  whitespace.
+- **`/register`:** every bad token is the same `401 invalid_token`; bad
+  metadata is `400 invalid_client_metadata` and must NOT spend the token. No
+  `registration_access_token` (RFC 7592 is out of scope).
+- **Re-enable:** owners may re-enable `idle` / `revoked-by-owner` clients, never
+  `revoked-by-admin` (may be a compromised key; recovery = new registration).
 - **Browser POSTs are CSRF-protected.** Every form includes the per-session
   `csrf_token`; handlers call `_check_csrf`. Destructive actions also confirm
   via a JS `confirm()` in the template. New POST routes must do the same.
@@ -95,12 +112,16 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - `tests/conftest.py` builds an isolated `Settings` per test (tmp DB, tmp key
   dir, `comanage_group_prefix`/`registry_admin_group`) and a `TestClient` with
   `base_url="https://testserver"` so the **Secure** session cookie is sent back.
+- `tests/helpers.py` (imported as `helpers`) generates shoveler RSA keys, JWKs,
+  Go-client-shaped assertions, and seeds tokens/clients (`seed_token`,
+  `seed_client`). Use it rather than inserting rows by hand.
 - For routes needing a logged-in user, monkeypatch `portal.main.current_user`
   to return a `UserInfo` with the right `groups` (e.g. `("shoveler-nebraska",)`);
   it's resolved as a module global at call time. CSRF token is scraped from a
   prior `GET` of the page.
-- Coverage lives in `test_token`, `test_jwks`, `test_authz`, `test_expire`,
-  `test_flow` (browser lifecycle), `test_admin`. Add to the matching file.
+- Coverage lives in `test_register`, `test_token` (incl. discovery),
+  `test_db`, `test_jwks`, `test_authz`, `test_expire`, `test_flow` (browser
+  lifecycle), `test_admin`. Add to the matching file.
 
 ## Gotchas
 
