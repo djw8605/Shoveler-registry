@@ -264,6 +264,9 @@ Prerequisites:
   the shovelers fetch `/.well-known/jwks.json` and `/token` over https.
 - A CILogon confidential client whose redirect URI is
   `<PORTAL_BASE_URL>/auth/callback` (see above).
+- COmanage groups named `<COMANAGE_GROUP_PREFIX><site>` (plus the
+  `REGISTRY_ADMIN_GROUP`, if used), released to the portal's CILogon client in
+  the `isMemberOf` claim (see Authorization above).
 - A StorageClass for a small ReadWriteOnce volume. Prefer block storage;
   SQLite in WAL mode is not safe on NFS.
 - A published image tag (see Docker above); the manifests pin `:0.1.0`.
@@ -275,17 +278,13 @@ Apply in this order:
 #    Fill values from k8s/secret.example.yaml; never commit the real one.
 kubectl create secret generic shoveler-auth-portal --from-env-file=prod.env
 
-# 2. Site-admins allow-list (reloaded on every request; edit the ConfigMap to grant access)
-kubectl create configmap shoveler-auth-site-admins \
-  --from-file=site-admins.yaml=./site-admins.yaml
-
-# 3. PVC, Deployment, Service
+# 2. PVC, Deployment, Service
 kubectl apply -f k8s/deployment.yaml
 
-# 4. Ingress (copy and edit host / class / issuer first)
+# 3. Ingress (copy and edit host / class / issuer first)
 kubectl apply -f k8s/ingress.yaml
 
-# 5. Nightly idle-expiry job
+# 4. Nightly idle-expiry job
 kubectl apply -f k8s/cronjob.yaml
 ```
 
