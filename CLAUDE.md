@@ -79,6 +79,8 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - **`/register`:** every bad token is the same `401 invalid_token`; bad
   metadata is `400 invalid_client_metadata` and must NOT spend the token. No
   `registration_access_token` (RFC 7592 is out of scope).
+- **Revoking registration tokens:** any manager of the token's site may revoke
+  a pending one (not owner-only, unlike client Disable/Re-enable).
 - **Re-enable:** owners may re-enable `idle` / `revoked-by-owner` clients, never
   `revoked-by-admin` (may be a compromised key; recovery = new registration).
 - **Browser POSTs are CSRF-protected.** Every form includes the per-session

@@ -278,7 +278,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         conn = db.connect(settings.db_path)
         try:
             row = db.get_registration_token(conn, token_hash)
-            if not _owns(row, user, settings):
+            # Any manager of the token's site may revoke it (not just its
+            # creator), e.g. if it leaked or the creator has left.
+            if row is None or not authz.may_manage_site(
+                user.groups,
+                settings.comanage_group_prefix,
+                row["site"],
+                admin_group=settings.registry_admin_group,
+            ):
                 _flash(request.session, "Not authorized for that token.", "error")
                 return RedirectResponse("/dashboard", status_code=303)
             if not db.revoke_registration_token(conn, token_hash):

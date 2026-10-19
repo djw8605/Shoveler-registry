@@ -187,6 +187,8 @@ of `<COMANAGE_GROUP_PREFIX><site>` is the approval, and the client gets the
 normal `SCOPE_VALUE` (any requested scope is ignored).
 
 - The token is **single-use** and expires after `REGISTRATION_TOKEN_TTL_SECONDS`.
+  Until it is used, **any** manager of its site (not only its creator) can
+  revoke it on the dashboard.
   Spending it and creating the client happen in one transaction, so of two
   concurrent uses exactly one succeeds.
 - A missing, unknown, expired, revoked or already-used token gets

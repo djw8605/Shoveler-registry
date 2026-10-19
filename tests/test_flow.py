@@ -145,13 +145,29 @@ def test_token_create_requires_csrf(client, settings, monkeypatch):
     assert 'id="token"' not in resp.text
 
 
-def test_other_users_token_cannot_be_revoked(client, settings, monkeypatch):
-    # Bob also manages nebraska but didn't create Alice's token.
+def _alice_token_hash(client, monkeypatch):
     _login(monkeypatch)
     csrf = _csrf(client)
     client.post("/registration-tokens", data={"site": "nebraska", "csrf_token": csrf})
-    token_hash = re.search(r'/registration-tokens/([0-9a-f]{64})/revoke', client.get("/dashboard").text).group(1)
+    html = client.get("/dashboard").text
+    return csrf, re.search(r"/registration-tokens/([0-9a-f]{64})/revoke", html).group(1)
 
+
+def test_any_site_manager_can_revoke_token(client, settings, monkeypatch):
+    # Bob also manages nebraska; he didn't create Alice's token but may revoke it.
+    csrf, token_hash = _alice_token_hash(client, monkeypatch)
     _login(monkeypatch, sub="bob", email="bob@unl.edu")
     resp = client.post(f"/registration-tokens/{token_hash}/revoke", data={"csrf_token": csrf})
+    assert "Registration token revoked." in resp.text
+
+
+def test_non_manager_cannot_revoke_token(client, settings, monkeypatch):
+    csrf, token_hash = _alice_token_hash(client, monkeypatch)
+    _login(monkeypatch, sub="bob", email="bob@wisc.edu", groups=("shoveler-wisconsin",))
+    resp = client.post(f"/registration-tokens/{token_hash}/revoke", data={"csrf_token": csrf})
     assert "Not authorized for that token." in resp.text
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.get_registration_token(conn, token_hash)["revoked"] == 0
+    finally:
+        conn.close()
