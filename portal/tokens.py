@@ -25,6 +25,10 @@ from .keys import ALG, KeyStore
 
 _hasher = PasswordHasher()
 
+# A real hash of a random secret, verified against when the client_id is
+# unknown so that path costs the same argon2 work as a wrong secret.
+_DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(32))
+
 
 def generate_secret() -> str:
     """High-entropy client secret; shown once, never stored in the clear."""
@@ -138,10 +142,7 @@ def issue_token(
     row = db.get_client(conn, client_id)
     if row is None:
         # Verify against a dummy hash to keep timing roughly uniform.
-        verify_secret(
-            "$argon2id$v=19$m=65536,t=3,p=4$" + "A" * 22 + "$" + "B" * 43,
-            client_secret,
-        )
+        verify_secret(_DUMMY_HASH, client_secret)
         raise TokenError(401, "invalid_client")
 
     if row["disabled"]:

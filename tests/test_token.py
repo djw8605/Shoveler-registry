@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 
 import jwt
+import pytest
+from argon2.exceptions import VerifyMismatchError
 from jwt.algorithms import RSAAlgorithm
 
 from portal import db, tokens
@@ -134,3 +136,10 @@ def test_http_basic_auth_accepted(client, settings):
     )
     assert resp.status_code == 200
     assert "access_token" in resp.json()
+
+
+def test_unknown_client_dummy_hash_is_real_argon2():
+    # A malformed dummy hash short-circuits verify and leaks client_id
+    # existence via timing; it must be a parseable hash that just mismatches.
+    with pytest.raises(VerifyMismatchError):
+        tokens._hasher.verify(tokens._DUMMY_HASH, "not-the-secret")
