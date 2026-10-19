@@ -35,7 +35,9 @@ spec:
             fsGroup: 10001
           containers:
             - name: expire
-              image: ghcr.io/djw8605/shoveler-auth-portal:latest
+              # Pin a released tag (pushing git tag v0.1.0 publishes :0.1.0) rather
+              # than :latest; keep the Deployment and CronJob on the same tag.
+              image: ghcr.io/djw8605/shoveler-auth-portal:0.1.0
               command: ["python", "-m", "portal.expire"]
               envFrom:
                 - secretRef:
