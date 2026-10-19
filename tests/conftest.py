@@ -26,6 +26,9 @@ def settings(tmp_path) -> Settings:
         admin_contact="admin@example.org",
         token_rate_limit=1000,
         token_rate_window=60,
+        registration_token_ttl_seconds=259200,
+        register_rate_limit=1000,
+        register_rate_window=60,
         # A COmanage group named "shoveler-<site>" grants management of <site>;
         # membership in "shoveler-admins" grants the registry-wide admin role.
         comanage_group_prefix="shoveler-",

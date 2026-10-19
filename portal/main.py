@@ -19,7 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import authz, db, tokens
+from . import authz, db, registration, tokens
 from .auth import OIDCClient, current_user, login_user, logout_user
 from .config import Settings, get_settings
 from .keys import ensure_keys, load_keys
@@ -70,6 +70,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app.state.oidc = OIDCClient(settings)
     app.state.rate_limiter = tokens.RateLimiter(
         settings.token_rate_limit, settings.token_rate_window
+    )
+    app.state.register_rate_limiter = tokens.RateLimiter(
+        settings.register_rate_limit, settings.register_rate_window
     )
 
     https_only = settings.portal_base_url.lower().startswith("https://")
@@ -332,6 +335,36 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             conn.close()
         return JSONResponse(
             result.as_dict(), headers={"Cache-Control": "no-store", "Pragma": "no-cache"}
+        )
+
+    @app.post("/register")
+    async def register_endpoint(request: Request):
+        # Keyed by client IP; behind the ingress, uvicorn's --proxy-headers
+        # (FORWARDED_ALLOW_IPS) supplies the real client address here.
+        ip = request.client.host if request.client else "unknown"
+        if not app.state.register_rate_limiter.check(ip):
+            return JSONResponse(
+                {"error": "invalid_request", "error_description": "rate limit exceeded"},
+                status_code=429,
+                headers={"Retry-After": str(settings.register_rate_window)},
+            )
+        try:
+            body = await request.json()
+        except ValueError:
+            body = None
+        bearer = registration.parse_bearer(request.headers.get("authorization"))
+        conn = db.connect(settings.db_path)
+        try:
+            result = registration.register(conn, bearer=bearer, body=body)
+        except registration.RegistrationError as exc:
+            headers = {"Cache-Control": "no-store"}
+            if exc.status == 401:
+                headers["WWW-Authenticate"] = 'Bearer error="invalid_token"'
+            return JSONResponse(exc.as_dict(), status_code=exc.status, headers=headers)
+        finally:
+            conn.close()
+        return JSONResponse(
+            result, status_code=201, headers={"Cache-Control": "no-store"}
         )
 
     @app.get("/.well-known/jwks.json")

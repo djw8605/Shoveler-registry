@@ -47,6 +47,13 @@ class Settings:
     token_rate_limit: int
     token_rate_window: int
 
+    # --- Shoveler self-registration ---
+    # Lifetime of a one-time registration token minted on the dashboard.
+    registration_token_ttl_seconds: int
+    # Per-client-IP rate limit on /register: N requests per window seconds.
+    register_rate_limit: int
+    register_rate_window: int
+
     # --- COmanage group-based authorization ---
     # Site authorization comes from the CILogon ``isMemberOf`` claim (the
     # COmanage groups the user belongs to). A group named
@@ -86,6 +93,11 @@ def get_settings() -> Settings:
         admin_contact=os.environ.get("ADMIN_CONTACT", "your central admin"),
         token_rate_limit=int(os.environ.get("TOKEN_RATE_LIMIT", "30")),
         token_rate_window=int(os.environ.get("TOKEN_RATE_WINDOW", "60")),
+        registration_token_ttl_seconds=int(
+            os.environ.get("REGISTRATION_TOKEN_TTL_SECONDS", "259200")
+        ),
+        register_rate_limit=int(os.environ.get("REGISTER_RATE_LIMIT", "10")),
+        register_rate_window=int(os.environ.get("REGISTER_RATE_WINDOW", "60")),
         comanage_group_prefix=os.environ.get("COMANAGE_GROUP_PREFIX", "shoveler-"),
         registry_admin_group=os.environ.get("REGISTRY_ADMIN_GROUP", "").strip(),
     )
