@@ -1,20 +1,17 @@
-"""Idle-expiry disables the right rows; Recreate recovers them."""
+"""Idle-expiry disables the right rows; Re-enable recovers them."""
 
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from portal import db, expire, tokens
+from helpers import seed_client
+from portal import db, expire
 
 
 def _insert(settings, client_id, *, last_used=None, created=None):
-    db.init_db(settings.db_path)
+    seed_client(settings, client_id)
     conn = db.connect(settings.db_path)
     try:
-        db.insert_client(
-            conn, client_id=client_id, secret_hash=tokens.hash_secret("x"),
-            site="nebraska", owner_sub="sub", owner_email=None,
-        )
         if created is not None:
             conn.execute(
                 "UPDATE clients SET created_at = ? WHERE client_id = ?",
@@ -93,14 +90,14 @@ def test_already_disabled_rows_untouched(settings):
         conn.close()
 
 
-def test_recreate_recovers_idle_client(settings):
+def test_reenable_recovers_idle_client(settings):
     _insert(settings, "shoveler-stale", last_used=_iso(40))
     conn = db.connect(settings.db_path)
     try:
         expire.find_and_disable_idle(conn, settings.idle_days)
         assert db.get_client(conn, "shoveler-stale")["disabled"] == 1
-        # Recreate rotates the secret AND clears the disabled flag.
-        db.rotate_secret(conn, "shoveler-stale", tokens.hash_secret("new"))
+        # Re-enable clears the disabled flag; the client keeps its key.
+        db.enable_client(conn, "shoveler-stale")
         row = db.get_client(conn, "shoveler-stale")
         assert row["disabled"] == 0
         assert row["disabled_reason"] is None

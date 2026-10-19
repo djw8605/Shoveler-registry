@@ -7,6 +7,7 @@ disabled client, or wrong secret) so it never reveals which was wrong.
 
 from __future__ import annotations
 
+import hashlib
 import secrets
 import time
 import uuid
@@ -33,6 +34,17 @@ _DUMMY_HASH = _hasher.hash(secrets.token_urlsafe(32))
 def generate_secret() -> str:
     """High-entropy client secret; shown once, never stored in the clear."""
     return secrets.token_urlsafe(32)
+
+
+def generate_registration_token() -> str:
+    """One-time registration (initial access) token; shown once."""
+    return secrets.token_urlsafe(32)
+
+
+def hash_registration_token(token: str) -> str:
+    """SHA-256, not argon2: the token is 256 random bits, so a fast hash is
+    safe, and it lets /register look the token up by its hash."""
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def generate_client_id() -> str:

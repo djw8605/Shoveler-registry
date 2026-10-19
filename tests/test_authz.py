@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import portal.main as main_mod
-from portal import authz, db, tokens
+from helpers import seed_client
+from portal import authz
 from portal.auth import UserInfo
 
 ALICE = "http://cilogon.org/serverA/users/11111"  # nebraska
@@ -41,18 +42,10 @@ def test_may_manage_site():
 
 
 def _seed(settings):
-    conn = db.connect(settings.db_path)
-    try:
-        db.insert_client(
-            conn, client_id="shoveler-neb1", secret_hash=tokens.hash_secret("a"),
-            site="nebraska", owner_sub=ALICE, owner_email="alice@unl.edu",
-        )
-        db.insert_client(
-            conn, client_id="shoveler-wis1", secret_hash=tokens.hash_secret("b"),
-            site="wisconsin", owner_sub=BOB, owner_email="bob@wisc.edu",
-        )
-    finally:
-        conn.close()
+    seed_client(settings, "shoveler-neb1", site="nebraska", owner_sub=ALICE,
+                owner_email="alice@unl.edu")
+    seed_client(settings, "shoveler-wis1", site="wisconsin", owner_sub=BOB,
+                owner_email="bob@wisc.edu")
 
 
 def test_dashboard_shows_only_user_sites(app, client, settings, monkeypatch):
