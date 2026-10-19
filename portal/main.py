@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import FastAPI, Form, Request
@@ -154,12 +155,22 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         conn = db.connect(settings.db_path)
         try:
             rows = db.list_clients_for_sites(conn, sites)
+            token_rows = db.list_registration_tokens_for_sites(conn, sites)
         finally:
             conn.close()
         by_site = {site: [] for site in sites}
         for row in rows:
             by_site[row["site"]].append(_client_view(row, settings.idle_days))
-        return render(request, "dashboard.html", sites=sites, by_site=by_site)
+        tokens_by_site = {site: [] for site in sites}
+        for row in token_rows:
+            tokens_by_site[row["site"]].append(_token_view(row))
+        return render(
+            request,
+            "dashboard.html",
+            sites=sites,
+            by_site=by_site,
+            tokens_by_site=tokens_by_site,
+        )
 
     @app.get("/admin", response_class=HTMLResponse)
     def admin(request: Request):
@@ -204,8 +215,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         _flash(request.session, f"Credential {client_id} disabled.", "info")
         return RedirectResponse("/admin", status_code=303)
 
-    @app.post("/credentials/create")
-    def credentials_create(
+    @app.post("/registration-tokens")
+    def registration_token_create(
         request: Request, site: str = Form(...), csrf_token: str = Form(...)
     ):
         user = current_user(request.session)
@@ -220,32 +231,36 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             _flash(request.session, "You may not manage that site.", "error")
             return RedirectResponse("/dashboard", status_code=303)
 
-        client_id = tokens.generate_client_id()
-        secret = tokens.generate_secret()
+        token = tokens.generate_registration_token()
+        expires_at = db.to_iso(
+            datetime.now(timezone.utc)
+            + timedelta(seconds=settings.registration_token_ttl_seconds)
+        )
         conn = db.connect(settings.db_path)
         try:
-            db.insert_client(
+            db.insert_registration_token(
                 conn,
-                client_id=client_id,
-                secret_hash=tokens.hash_secret(secret),
+                token_hash=tokens.hash_registration_token(token),
                 site=site,
                 owner_sub=user.sub,
                 owner_email=user.email,
+                expires_at=expires_at,
             )
         finally:
             conn.close()
         return render(
             request,
-            "secret_once.html",
-            client_id=client_id,
-            secret=secret,
+            "registration_token.html",
+            token=token,
+            expires_at=expires_at,
             site=site,
-            snippet=_shoveler_snippet(settings, client_id, secret),
+            token_file=BOOTSTRAP_TOKEN_FILE,
+            snippet=_shoveler_snippet(settings, site),
         )
 
-    @app.post("/credentials/{client_id}/recreate")
-    def credentials_recreate(
-        request: Request, client_id: str, csrf_token: str = Form(...)
+    @app.post("/registration-tokens/{token_hash}/revoke")
+    def registration_token_revoke(
+        request: Request, token_hash: str, csrf_token: str = Form(...)
     ):
         user = current_user(request.session)
         if not user:
@@ -255,23 +270,17 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
         try:
-            row = db.get_client(conn, client_id)
+            row = db.get_registration_token(conn, token_hash)
             if not _owns(row, user, settings):
-                _flash(request.session, "Not authorized for that credential.", "error")
+                _flash(request.session, "Not authorized for that token.", "error")
                 return RedirectResponse("/dashboard", status_code=303)
-            secret = tokens.generate_secret()
-            db.rotate_secret(conn, client_id, tokens.hash_secret(secret))
+            if not db.revoke_registration_token(conn, token_hash):
+                _flash(request.session, "That token was already used or revoked.", "error")
+                return RedirectResponse("/dashboard", status_code=303)
         finally:
             conn.close()
-        return render(
-            request,
-            "secret_once.html",
-            client_id=client_id,
-            secret=secret,
-            site=row["site"],
-            recreated=True,
-            snippet=_shoveler_snippet(settings, client_id, secret),
-        )
+        _flash(request.session, "Registration token revoked.", "info")
+        return RedirectResponse("/dashboard", status_code=303)
 
     @app.post("/credentials/{client_id}/disable")
     def credentials_disable(
@@ -293,6 +302,37 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         finally:
             conn.close()
         _flash(request.session, f"Credential {client_id} disabled.", "info")
+        return RedirectResponse("/dashboard", status_code=303)
+
+    @app.post("/credentials/{client_id}/enable")
+    def credentials_enable(
+        request: Request, client_id: str, csrf_token: str = Form(...)
+    ):
+        user = current_user(request.session)
+        if not user:
+            return RedirectResponse("/", status_code=303)
+        if not _check_csrf(request.session, csrf_token):
+            _flash(request.session, "Invalid CSRF token.", "error")
+            return RedirectResponse("/dashboard", status_code=303)
+        conn = db.connect(settings.db_path)
+        try:
+            row = db.get_client(conn, client_id)
+            if not _owns(row, user, settings):
+                _flash(request.session, "Not authorized for that credential.", "error")
+                return RedirectResponse("/dashboard", status_code=303)
+            if not _can_reenable(row):
+                # An admin revocation may mean a compromised key: recovery is a
+                # new registration token (and so a new client and key).
+                _flash(
+                    request.session,
+                    "This credential can't be re-enabled; create a new registration token.",
+                    "error",
+                )
+                return RedirectResponse("/dashboard", status_code=303)
+            db.enable_client(conn, client_id)
+        finally:
+            conn.close()
+        _flash(request.session, f"Credential {client_id} re-enabled.", "info")
         return RedirectResponse("/dashboard", status_code=303)
 
     # --- Machine-facing routes ------------------------------------------
@@ -408,9 +448,21 @@ def _owns(row, user, settings: Settings) -> bool:
     )
 
 
-def _client_view(row, idle_days: int) -> dict:
-    from datetime import datetime, timezone
+# Disabled reasons the owner may undo. "revoked-by-admin" is deliberately
+# absent: it may mean a compromised key, so recovery is a new registration.
+REENABLE_REASONS = {"idle", "revoked-by-owner"}
 
+# Where the one-time page tells operators to put the registration token (the
+# shoveler's amqp.oauth.bootstrap_token_file). Its key and registration state
+# are persisted alongside, under the same directory.
+BOOTSTRAP_TOKEN_FILE = "/etc/xrootd-monitoring-shoveler/oauth/bootstrap.token"
+
+
+def _can_reenable(row) -> bool:
+    return bool(row["disabled"]) and row["disabled_reason"] in REENABLE_REASONS
+
+
+def _client_view(row, idle_days: int) -> dict:
     if row["disabled"]:
         status = "disabled"
     else:
@@ -424,25 +476,44 @@ def _client_view(row, idle_days: int) -> dict:
     return {
         "client_id": row["client_id"],
         "site": row["site"],
+        "client_name": row["client_name"],
+        "thumbprint": row["key_thumbprint"][:12],
         "created_at": row["created_at"],
         "last_used_at": row["last_used_at"],
         "status": status,
         "disabled_reason": row["disabled_reason"],
+        "can_reenable": _can_reenable(row),
     }
 
 
-def _shoveler_snippet(settings: Settings, client_id: str, secret: str) -> str:
-    token_endpoint = settings.portal_base_url.rstrip("/") + "/token"
+def _token_view(row) -> dict:
+    if row["revoked"]:
+        status = "revoked"
+    elif row["used_at"]:
+        status = "used"
+    elif db.parse_ts(row["expires_at"]) <= datetime.now(timezone.utc):
+        status = "expired"
+    else:
+        status = "pending"
+    return {
+        "token_hash": row["token_hash"],
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+        "client_id": row["client_id"],
+        "owner_email": row["owner_email"],
+        "status": status,
+    }
+
+
+def _shoveler_snippet(settings: Settings, site: str) -> str:
+    base = settings.portal_base_url.rstrip("/")
     return (
-        "# xrootd-monitoring-shoveler config.yaml\n"
-        "# Credentials issued by the Shoveler Auth Portal (client_credentials).\n"
-        "mq: amqp\n"
+        "# xrootd-monitoring-shoveler config.yaml (merge into your amqp: section)\n"
         "amqp:\n"
-        "  # adjust host/exchange to your RabbitMQ deployment\n"
-        "  url: amqps://your-rabbit-host:5671\n"
-        "  exchange: shoveled\n"
-        "  token:\n"
-        f'    client_id: "{client_id}"\n'
-        f'    client_secret: "{secret}"\n'
-        f'    token_endpoint: "{token_endpoint}"\n'
+        "  oauth:\n"
+        "    enabled: true\n"
+        f"    token_url: {base}/token\n"
+        f"    registration_url: {base}/register\n"
+        f"    bootstrap_token_file: {BOOTSTRAP_TOKEN_FILE}\n"
+        f"    client_name: {site}\n"
     )

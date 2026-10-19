@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+
+{% block content %}
+<div class="mx-auto max-w-3xl space-y-6">
+  <div class="rounded-lg border-2 border-amber-300 bg-amber-50 px-5 py-4">
+    <h1 class="text-lg font-semibold text-amber-900">Registration token created — copy it now</h1>
+    <p class="mt-1 text-sm text-amber-800">
+      This is the <strong>only</strong> time the token will be shown; we store only a
+      hash. It registers <strong>one</strong> shoveler for <strong>{{ site }}</strong> and
+      expires at {{ expires_at[:16] | replace("T", " ") }} UTC. If you lose it, revoke it
+      on the dashboard and create another.
+    </p>
+  </div>
+
+  {% call ui.card(title="Registration token for " ~ site) %}
+    <div class="flex items-center gap-2">
+      <code id="token" class="flex-1 break-all rounded bg-slate-100 px-3 py-2 font-mono text-sm text-slate-900">{{ token }}</code>
+      {{ ui.button("Copy", "button", "secondary", extra="js-copy") }}
+    </div>
+  {% endcall %}
+
+  {% call ui.card(title="1. Save the token on the shoveler host") %}
+    <p class="mb-3 text-sm text-slate-600">
+      Write it to <code class="font-mono text-xs">{{ token_file }}</code>, readable only by the
+      user the shoveler runs as (mode 0600). That user must also be able to write the
+      directory. Run this, paste the token, then press Ctrl-D
+      (keeps the token out of your shell history):
+    </p>
+    <div class="flex items-start gap-2">
+      <pre class="flex-1 overflow-x-auto rounded bg-slate-900 px-4 py-3 font-mono text-xs leading-5 text-slate-100">sudo install -d -m 0700 {{ token_file.rsplit("/", 1)[0] }}
+sudo sh -c 'umask 077; cat > {{ token_file }}'
+# The shoveler also writes its key here; if it doesn't run as root:
+# sudo chown -R SHOVELER_USER {{ token_file.rsplit("/", 1)[0] }}</pre>
+      {{ ui.button("Copy", "button", "secondary", extra="js-copy") }}
+    </div>
+  {% endcall %}
+
+  {% call ui.card(title="2. Configure the shoveler") %}
+    <div class="flex items-start gap-2">
+      <pre id="snippet" class="flex-1 overflow-x-auto rounded bg-slate-900 px-4 py-3 font-mono text-xs leading-5 text-slate-100">{{ snippet }}</pre>
+      {{ ui.button("Copy", "button", "secondary", extra="js-copy") }}
+    </div>
+    <ul class="mt-4 list-disc space-y-1 pl-5 text-sm text-slate-600">
+      <li>
+        On first start the shoveler generates its own key, registers its public key
+        with this token, and starts fetching access tokens. The private key never
+        leaves the host.
+      </li>
+      <li>
+        After the first successful start you may delete the token file; it can't be
+        used again.
+      </li>
+      <li>
+        The shoveler keeps its key and <code class="font-mono text-xs">client_id</code> in
+        <code class="font-mono text-xs">{{ token_file.rsplit("/", 1)[0] }}/</code>.
+        <strong>That directory must survive restarts and redeploys</strong> (e.g. a
+        persistent volume in a container). If it is lost, create a new registration token.
+      </li>
+    </ul>
+  {% endcall %}
+
+  <div>
+    <a href="/dashboard" class="text-sm font-medium text-indigo-600 hover:text-indigo-500">&larr; Back to dashboard</a>
+  </div>
+</div>
+
+<script>
+  // Copy-to-clipboard: each .js-copy button copies the sibling code/pre block.
+  document.querySelectorAll(".js-copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var target = btn.previousElementSibling;
+      var text = target ? target.textContent : "";
+      navigator.clipboard.writeText(text).then(function () {
+        var original = btn.textContent;
+        btn.textContent = "Copied";
+        setTimeout(function () { btn.textContent = original; }, 1500);
+      });
+    });
+  });
+</script>
+{% endblock %}

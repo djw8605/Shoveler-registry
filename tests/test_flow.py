@@ -1,17 +1,17 @@
-"""End-to-end browser flow: create -> one-time secret -> token -> recreate -> disable."""
+"""End-to-end browser flow: registration token -> /register -> /token -> disable -> re-enable."""
 
 from __future__ import annotations
 
-import json
 import re
 
-import jwt
 import portal.main as main_mod
-from jwt.algorithms import RSAAlgorithm
+from helpers import make_assertion, new_key, registration_body, seed_client, token_form
+from portal import db
 from portal.auth import UserInfo
 
 ALICE = "http://cilogon.org/serverA/users/11111"  # nebraska in conftest
 ALICE_GROUPS = ("shoveler-nebraska",)  # COmanage group granting site "nebraska"
+TOKEN_URL = "https://portal.test/token"
 
 
 def _login(monkeypatch, sub=ALICE, email="alice@unl.edu", groups=ALICE_GROUPS):
@@ -29,65 +29,129 @@ def _field(html, elem_id):
     return re.search(rf'id="{elem_id}"[^>]*>([^<]+)<', html).group(1)
 
 
-def _verify(client, token, settings):
-    jwks = client.get("/.well-known/jwks.json").json()
-    hdr = jwt.get_unverified_header(token)
-    jwk = next(k for k in jwks["keys"] if k["kid"] == hdr["kid"])
-    return jwt.decode(
-        token,
-        RSAAlgorithm.from_jwk(json.dumps(jwk)),
-        algorithms=["RS256"],
-        audience=settings.resource_server_id,
-    )
+def _get_token(client, key, cid):
+    return client.post("/token", data=token_form(make_assertion(key, cid, TOKEN_URL)))
 
 
-def test_create_use_recreate_disable(client, settings, monkeypatch):
+def test_register_use_disable_reenable(client, settings, monkeypatch):
     _login(monkeypatch)
     csrf = _csrf(client)
 
-    # Create shows the secret exactly once + a ready-to-paste snippet.
-    resp = client.post("/credentials/create", data={"site": "nebraska", "csrf_token": csrf})
-    assert resp.status_code == 200
-    assert "copy it now" in resp.text and "token_endpoint" in resp.text
-    cid = _field(resp.text, "cid")
-    secret = _field(resp.text, "secret")
+    # Create shows the token exactly once + a snippet in the shoveler's format.
+    page = client.post("/registration-tokens", data={"site": "nebraska", "csrf_token": csrf})
+    assert page.status_code == 200
+    assert "copy it now" in page.text
+    assert "registration_url: https://portal.test/register" in page.text
+    assert "token_url: https://portal.test/token" in page.text
+    assert "bootstrap_token_file: /etc/xrootd-monitoring-shoveler/oauth/bootstrap.token" in page.text
+    token = _field(page.text, "token")
 
-    # The minted token verifies against JWKS with the exact aud + scope claim.
-    tok = client.post(
-        "/token",
-        data={"grant_type": "client_credentials", "client_id": cid, "client_secret": secret},
-    ).json()
-    claims = _verify(client, tok["access_token"], settings)
-    assert claims["sub"] == cid
-    assert claims["aud"] == settings.resource_server_id
-    assert claims[settings.scope_claim] == settings.scope_value
+    # The dashboard lists it as pending.
+    assert ">pending<" in client.get("/dashboard").text
 
-    # Recreate rotates the secret; the old one stops working.
-    r2 = client.post(f"/credentials/{cid}/recreate", data={"csrf_token": csrf})
-    assert "Secret rotated" in r2.text
-    new_secret = _field(r2.text, "secret")
-    assert new_secret != secret
-    old = client.post(
-        "/token",
-        data={"grant_type": "client_credentials", "client_id": cid, "client_secret": secret},
+    # The shoveler registers its public key with the token...
+    key = new_key()
+    reg = client.post(
+        "/register", json=registration_body(key, client_name="neb-xrd1"),
+        headers={"Authorization": f"Bearer {token}"},
     )
-    assert old.status_code == 401
+    assert reg.status_code == 201
+    cid = reg.json()["client_id"]
+    dash = client.get("/dashboard").text
+    assert ">used<" in dash and cid in dash and "neb-xrd1" in dash
 
-    # Disable revokes the credential entirely.
+    # ...and fetches access tokens with private_key_jwt.
+    assert _get_token(client, key, cid).status_code == 200
+
+    # Owner disable stops token issuance.
     client.post(f"/credentials/{cid}/disable", data={"csrf_token": csrf})
-    after = client.post(
-        "/token",
-        data={"grant_type": "client_credentials", "client_id": cid, "client_secret": new_secret},
+    assert _get_token(client, key, cid).status_code == 401
+    assert f"/credentials/{cid}/enable" in client.get("/dashboard").text
+
+    # Re-enable restores it with the same key; no shoveler-side change needed.
+    client.post(f"/credentials/{cid}/enable", data={"csrf_token": csrf})
+    assert _get_token(client, key, cid).status_code == 200
+
+
+def test_admin_revoked_client_cannot_be_reenabled_by_owner(client, settings, monkeypatch):
+    key = seed_client(settings, "shoveler-neb1", owner_sub=ALICE)
+    conn = db.connect(settings.db_path)
+    try:
+        db.disable_client(conn, "shoveler-neb1", "revoked-by-admin")
+    finally:
+        conn.close()
+    _login(monkeypatch)
+    csrf = _csrf(client)
+    assert "/credentials/shoveler-neb1/enable" not in client.get("/dashboard").text
+
+    resp = client.post("/credentials/shoveler-neb1/enable", data={"csrf_token": csrf})
+    assert "create a new registration token" in resp.text
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.get_client(conn, "shoveler-neb1")["disabled"] == 1
+    finally:
+        conn.close()
+    assert _get_token(client, key, "shoveler-neb1").status_code == 401
+
+
+def test_idle_client_can_be_reenabled(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-neb1", owner_sub=ALICE)
+    conn = db.connect(settings.db_path)
+    try:
+        db.disable_client(conn, "shoveler-neb1", "idle")
+    finally:
+        conn.close()
+    _login(monkeypatch)
+    csrf = _csrf(client)
+    client.post("/credentials/shoveler-neb1/enable", data={"csrf_token": csrf})
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.get_client(conn, "shoveler-neb1")["disabled"] == 0
+    finally:
+        conn.close()
+
+
+def test_revoke_pending_token(client, settings, monkeypatch):
+    _login(monkeypatch)
+    csrf = _csrf(client)
+    page = client.post("/registration-tokens", data={"site": "nebraska", "csrf_token": csrf})
+    token = _field(page.text, "token")
+    token_hash = re.search(r'/registration-tokens/([0-9a-f]{64})/revoke', client.get("/dashboard").text).group(1)
+
+    dash = client.post(f"/registration-tokens/{token_hash}/revoke", data={"csrf_token": csrf})
+    assert "Registration token revoked." in dash.text and ">revoked<" in dash.text
+    reg = client.post(
+        "/register", json=registration_body(new_key()),
+        headers={"Authorization": f"Bearer {token}"},
     )
-    assert after.status_code == 401
+    assert reg.status_code == 401
 
 
-def test_cannot_create_for_unmanaged_site(client, settings, monkeypatch):
+def test_cannot_create_token_for_unmanaged_site(client, settings, monkeypatch):
     _login(monkeypatch)  # Alice manages nebraska only
     csrf = _csrf(client)
-    resp = client.post(
-        "/credentials/create", data={"site": "wisconsin", "csrf_token": csrf}
-    )
-    # Redirected back to dashboard with a flash; no credential created.
+    resp = client.post("/registration-tokens", data={"site": "wisconsin", "csrf_token": csrf})
+    # Redirected back to dashboard with a flash; no token created.
     assert resp.url.path == "/dashboard"
-    assert "shoveler-" not in resp.text
+    assert "You may not manage that site." in resp.text
+    assert 'id="token"' not in resp.text
+
+
+def test_token_create_requires_csrf(client, settings, monkeypatch):
+    _login(monkeypatch)
+    _csrf(client)
+    resp = client.post("/registration-tokens", data={"site": "nebraska", "csrf_token": "bad"})
+    assert resp.url.path == "/dashboard"
+    assert 'id="token"' not in resp.text
+
+
+def test_other_users_token_cannot_be_revoked(client, settings, monkeypatch):
+    # Bob also manages nebraska but didn't create Alice's token.
+    _login(monkeypatch)
+    csrf = _csrf(client)
+    client.post("/registration-tokens", data={"site": "nebraska", "csrf_token": csrf})
+    token_hash = re.search(r'/registration-tokens/([0-9a-f]{64})/revoke', client.get("/dashboard").text).group(1)
+
+    _login(monkeypatch, sub="bob", email="bob@unl.edu")
+    resp = client.post(f"/registration-tokens/{token_hash}/revoke", data={"csrf_token": csrf})
+    assert "Not authorized for that token." in resp.text

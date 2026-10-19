@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import portal.main as main_mod
-from helpers import seed_client
+from helpers import kid_for, seed_client, shared_key
 from portal import authz, db
 from portal.auth import UserInfo
 
@@ -39,6 +39,9 @@ def test_admin_sees_all_sites(app, client, settings, monkeypatch):
     assert "shoveler-neb1" in resp.text and "shoveler-wis1" in resp.text
     assert "nebraska" in resp.text and "wisconsin" in resp.text
     assert "bob@wisc.edu" in resp.text
+    # Each client shows its registered name and a shortened key thumbprint.
+    assert ">shoveler<" in resp.text
+    assert kid_for(shared_key())[:12] in resp.text
 
 
 def test_non_admin_cannot_reach_admin(app, client, settings, monkeypatch):

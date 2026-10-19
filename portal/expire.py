@@ -6,8 +6,9 @@ Run from cron or a Kubernetes CronJob:
 
 The reference time is ``last_used_at`` (or ``created_at`` if a credential was
 never used). Only currently-enabled rows are affected. Rows are never deleted
-(audit + recovery); recovery is self-service via the dashboard's Recreate
-button, which clears the disabled flag.
+(audit + recovery); recovery is self-service via the dashboard's Re-enable
+button, which clears the disabled flag. The shoveler keeps its key and
+client_id, so nothing needs to change on the shoveler side.
 """
 
 from __future__ import annotations
