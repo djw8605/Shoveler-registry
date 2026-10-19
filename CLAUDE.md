@@ -110,6 +110,12 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   POST flow needs https to exercise end to end.
 - The rate limiter and key cache are in-process — they assume a single replica
   (the k8s Deployment is `replicas: 1` with a shared volume by design).
+- The data PVC is ReadWriteOnce: the Deployment must stay `strategy: Recreate`
+  and the CronJob keeps its pod affinity to the portal pod's node. Never give
+  the CronJob pod the `app: shoveler-auth-portal` label (Service/Deployment
+  select on it).
+- Python deps live only in `pyproject.toml`; the Dockerfile reads them from
+  there. Don't re-list them in the Dockerfile.
 
 ## Ops quick reference
 
@@ -118,6 +124,10 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - Idle-expiry: `python -m portal.expire` (k8s CronJob in `k8s/cronjob.yaml`).
 - Build image: `docker build -t shoveler-auth-portal .` (multi-stage; final
   image has no Node/node_modules; runs non-root).
+- Publish image: CI pushes to GHCR from `main` (`:latest`) and `v*` tags
+  (semver). Release = push a `vX.Y.Z` tag, then bump the pinned tag in both
+  `k8s/deployment.yaml` and `k8s/cronjob.yaml`. Full deploy order: README
+  "Deploying to Kubernetes".
 
 ## Repo hygiene
 

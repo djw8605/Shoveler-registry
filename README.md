@@ -45,7 +45,8 @@ assets/app.css  Tailwind source (source of truth)
 tailwind.config.js, package.json
 .env.example
 Dockerfile      multi-stage (node build → python runtime), non-root
-k8s/            deployment, cronjob, secret example
+k8s/            deployment, cronjob, ingress + secret examples
+.github/        CI: pytest, GHCR image build
 tests/
 ```
 
@@ -246,6 +247,71 @@ docker build -t shoveler-auth-portal .
 Stage 1 (`node:20-slim`) compiles and purges the CSS; stage 2
 (`python:3.12-slim`) runs the app as a non-root user with no Node or
 `node_modules` in the final image.
+
+CI ([`.github/workflows/image.yml`](./.github/workflows/image.yml)) builds the
+image on every PR and publishes `ghcr.io/djw8605/shoveler-auth-portal` from
+`main` (`:latest`, `:sha-<short>`) and from `v*` tags (`:1.2.3`, `:1.2`). Cut a
+release with `git tag v0.1.0 && git push origin v0.1.0`. A new GHCR package is
+private by default: make it public in the package settings, or give the
+cluster an `imagePullSecret`.
+
+## Deploying to Kubernetes
+
+Prerequisites:
+
+- A DNS name with TLS (an ingress controller, plus cert-manager or a TLS
+  Secret). HTTPS is required: the session cookie is `Secure`, and RabbitMQ and
+  the shovelers fetch `/.well-known/jwks.json` and `/token` over https.
+- A CILogon confidential client whose redirect URI is
+  `<PORTAL_BASE_URL>/auth/callback` (see above).
+- A StorageClass for a small ReadWriteOnce volume. Prefer block storage;
+  SQLite in WAL mode is not safe on NFS.
+- A published image tag (see Docker above); the manifests pin `:0.1.0`.
+
+Apply in this order:
+
+```bash
+# 1. Secret (portal's CILogon creds, session secret, issued-token claims).
+#    Fill values from k8s/secret.example.yaml; never commit the real one.
+kubectl create secret generic shoveler-auth-portal --from-env-file=prod.env
+
+# 2. Site-admins allow-list (reloaded on every request; edit the ConfigMap to grant access)
+kubectl create configmap shoveler-auth-site-admins \
+  --from-file=site-admins.yaml=./site-admins.yaml
+
+# 3. PVC, Deployment, Service
+kubectl apply -f k8s/deployment.yaml
+
+# 4. Ingress (copy and edit host / class / issuer first)
+kubectl apply -f k8s/ingress.yaml
+
+# 5. Nightly idle-expiry job
+kubectl apply -f k8s/cronjob.yaml
+```
+
+On first start the portal creates the SQLite DB and an active signing key on
+the volume; no bootstrap step is needed. Then check:
+
+```bash
+curl -s https://shoveler-auth.osg.example/healthz
+curl -s https://shoveler-auth.osg.example/.well-known/openid-configuration
+curl -s https://shoveler-auth.osg.example/.well-known/jwks.json
+```
+
+and configure RabbitMQ as described above (`issuer`, `resource_server_id` and
+`additional_scopes_key` must match the Secret exactly).
+
+Notes:
+
+- Keep `replicas: 1`. The Deployment uses `strategy: Recreate` because the
+  volume is ReadWriteOnce and SQLite must have a single writer; expect a few
+  seconds of downtime per rollout.
+- The CronJob shares the same volume, so it has pod affinity to run on the
+  portal pod's node. If the portal pod is down, the run waits up to an hour
+  for it and is then skipped.
+- Rotate keys with
+  `kubectl exec deploy/shoveler-auth-portal -- python -m portal.keys generate`,
+  then `kubectl rollout restart deploy/shoveler-auth-portal`.
 
 ## Security notes
 
