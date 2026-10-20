@@ -1,7 +1,7 @@
 """CILogon login (Authlib): redirect shape, callback validation, group capture.
 
-CILogon is stubbed at the HTTP transport: an ``httpx.MockTransport`` serves the
-discovery document, JWKS, token and userinfo endpoints, issuing ID tokens
+CILogon is stubbed at the HTTP transport: an ``httpx2.MockTransport`` serves
+the discovery document, JWKS, token and userinfo endpoints, issuing ID tokens
 signed with a test key. Everything above the transport (discovery, state,
 nonce and PKCE bookkeeping in the session, the token request and its client
 authentication, the JWKS fetch, ID-token validation, the userinfo call, the
@@ -13,7 +13,7 @@ from __future__ import annotations
 import time
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+import httpx2
 import jwt
 import pytest
 
@@ -29,14 +29,14 @@ class FakeCILogon:
     def __init__(self, settings):
         self.settings = settings
         self.key = helpers.new_key()
-        self.requests: list[httpx.Request] = []
+        self.requests: list[httpx2.Request] = []
         self.claims: dict = {"isMemberOf": [ADMIN]}
         self.userinfo: dict = {}
         self.userinfo_error: Exception | None = None
         self.nonce: str | None = None
         self.nonce_override: str | None = None
 
-    def requests_to(self, path: str) -> list[httpx.Request]:
+    def requests_to(self, path: str) -> list[httpx2.Request]:
         return [r for r in self.requests if r.url.path == path]
 
     def id_token(self) -> str:
@@ -56,10 +56,10 @@ class FakeCILogon:
             headers={"kid": helpers.kid_for(self.key)},
         )
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
+    def handle(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(request)
         if str(request.url) == self.settings.cilogon_discovery_url:
-            return httpx.Response(200, json={
+            return httpx2.Response(200, json={
                 "issuer": ISSUER,
                 "authorization_endpoint": ISSUER + "/authorize",
                 "token_endpoint": ISSUER + "/oauth2/token",
@@ -69,9 +69,9 @@ class FakeCILogon:
             })
         path = request.url.path
         if path == "/oauth2/certs":
-            return httpx.Response(200, json={"keys": [helpers.public_jwk(self.key)]})
+            return httpx2.Response(200, json={"keys": [helpers.public_jwk(self.key)]})
         if path == "/oauth2/token":
-            return httpx.Response(200, json={
+            return httpx2.Response(200, json={
                 "access_token": ACCESS_TOKEN,
                 "token_type": "Bearer",
                 "expires_in": 900,
@@ -80,15 +80,15 @@ class FakeCILogon:
         if path == "/oauth2/userinfo":
             if self.userinfo_error:
                 raise self.userinfo_error
-            return httpx.Response(200, json={"sub": SUB, **self.userinfo})
-        return httpx.Response(404)
+            return httpx2.Response(200, json={"sub": SUB, **self.userinfo})
+        return httpx2.Response(404)
 
 
 @pytest.fixture
 def idp(app, settings):
     """Stubbed CILogon; ``idp.requests`` records every request Authlib sends."""
     fake = FakeCILogon(settings)
-    transport = httpx.MockTransport(fake.handle)
+    transport = httpx2.MockTransport(fake.handle)
     app.state.oauth.cilogon.client_kwargs["transport"] = transport
     return fake
 
@@ -168,7 +168,7 @@ def test_groups_fall_back_to_userinfo(client, idp):
 
 def test_userinfo_failure_means_no_groups(client, idp, caplog):
     idp.claims = {}
-    idp.userinfo_error = httpx.ConnectError("down")
+    idp.userinfo_error = httpx2.ConnectError("down")
     params = start_login(client, idp)
     assert finish_login(client, params["state"]).headers["location"] == "/dashboard"
     assert "admin@example.org" in client.get("/dashboard").text
