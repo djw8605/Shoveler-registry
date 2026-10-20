@@ -1,9 +1,10 @@
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 
-# Shoveler Auth Portal on the tiger cluster (osg namespace; Traefik ingress,
-# cert-manager letsencrypt-prod, Ceph storage, sealed-secrets), following the
-# conventions of tiger-osg-config's os-registry.
+# Shoveler Auth Portal on the tiger cluster, osgdev namespace (tiger-osg-config's
+# development instance), served at shoveler-auth.osgdev.chtc.io by osgdev's own
+# Traefik (128.105.82.131); cert-manager letsencrypt-prod, Ceph storage,
+# sealed-secrets. Follows the conventions of tiger-osg-config's os-registry.
 #
 # Before the first deploy:
 #   1. Edit host.yaml and config.env (host, RESOURCE_SERVER_ID, SCOPE_VALUE, ...).
@@ -12,7 +13,7 @@ kind: Kustomization
 #      which writes sealed-secret.yaml (safe to commit; secret.env is gitignored).
 #   3. kubectl --context dweitzel2-tiger-dex apply -k k8s/overlays/tiger
 #      (or let Flux apply it from tiger-osg-config; see the README).
-namespace: osg
+namespace: osgdev # the host's *.osgdev.chtc.io resolves to this namespace's Traefik
 
 resources:
   - ../../base

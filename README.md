@@ -382,7 +382,7 @@ The manifests are a kustomize base plus one overlay per deployment:
 ```
 k8s/base/             generic: Deployment, Service, PVC, CronJob, Traefik Ingress,
                       cert-manager Certificate, NetworkPolicy (Traefik only)
-k8s/overlays/tiger/   the tiger cluster (namespace osg), following tiger-osg-config
+k8s/overlays/tiger/   the tiger cluster (namespace osgdev), following tiger-osg-config
   kustomization.yaml  namespace, image tag, storage class (3x-replica-nvme-raddus)
   host.yaml           the public host for the Ingress and Certificate
   config.env          non-secret settings -> ConfigMap (committed)
@@ -392,9 +392,11 @@ k8s/overlays/tiger/   the tiger cluster (namespace osg), following tiger-osg-con
 
 Prerequisites:
 
-- A DNS name for the portal (the tiger overlay uses `shoveler-auth.osg.chtc.io`)
-  pointing at the cluster's Traefik. On tiger there is no wildcard record, so
-  request one with the same address as `os-registry.osg.chtc.io`. cert-manager's `letsencrypt-prod`
+- A DNS name for the portal pointing at the namespace's Traefik. The tiger
+  overlay uses `shoveler-auth.osgdev.chtc.io`, which must resolve to osgdev's
+  Traefik, 128.105.82.131 (the address of `os-registry.osgdev.chtc.io`; the
+  `osg` namespace's Traefik is a different address). There is no wildcard
+  record, so each name needs its own entry. cert-manager's `letsencrypt-prod`
   ClusterIssuer issues the certificate. HTTPS is required: the session cookie
   is `Secure`, and RabbitMQ and the shovelers use `/register`, `/token` and
   `/.well-known/jwks.json` over https.
@@ -413,7 +415,7 @@ cd k8s/overlays/tiger
 # 1. Host: edit host.yaml, and PORTAL_BASE_URL / TOKEN_ISSUER in config.env.
 # 2. Settings: replace the REPLACE_ME values in config.env (RESOURCE_SERVER_ID
 #    and SCOPE_VALUE must match RabbitMQ).
-# 3. Secret: fill in secret.env and seal it for the osg namespace.
+# 3. Secret: fill in secret.env and seal it for the osgdev namespace.
 cp secret.env.example secret.env
 ./seal-secret.sh /path/to/tiger-osg-config/tiger-cert.pem
 # 4. Check the result.
@@ -422,16 +424,18 @@ kubectl kustomize .
 
 Then deploy it one of two ways:
 
-- **Through tiger-osg-config (production).** tiger's `osg` namespace is
-  synced by Flux from tiger-osg-config and must not be changed by hand. Copy
-  the overlay to `manifests/production/shoveler-auth-portal/` there, point its
-  base at this repo (`resources: [https://github.com/djw8605/Shoveler-registry//k8s/base?ref=v0.1.0, sealed-secret.yaml]`),
-  and add `shoveler-auth-portal` to `manifests/production/kustomization.yaml`.
-  If Flux refuses remote bases, copy `k8s/base` alongside instead.
+- **Through tiger-osg-config (the normal way).** tiger's namespaces are
+  synced by Flux from tiger-osg-config: `osgdev` from `manifests/development`,
+  `osg` from `manifests/production`. Copy the overlay to
+  `manifests/development/shoveler-auth-portal/` there, point its base at this
+  repo (`resources: [https://github.com/djw8605/Shoveler-registry//k8s/base?ref=v0.1.0, sealed-secret.yaml]`),
+  and add `shoveler-auth-portal` to `manifests/development/kustomization.yaml`.
+  If Flux refuses remote bases, copy `k8s/base` alongside instead. Moving to
+  production later means `namespace: osg`, an `*.osg.chtc.io` (or
+  `osg-htc.org`) host and resealing with `NAMESPACE=osg`.
 - **Directly, for testing.** Only with write access to the namespace (OSG
-  staff dex accounts are typically read-only). Use the tiger dex context (not
-  the default nautilus one), ideally with the namespace changed to `osgdev`
-  (and the secret resealed with `NAMESPACE=osgdev ./seal-secret.sh ...`):
+  staff dex accounts are typically read-only), and Flux may overwrite manual
+  changes. Use the tiger dex context, not the default nautilus one:
 
   ```bash
   kubectl --context dweitzel2-tiger-dex apply -k k8s/overlays/tiger
@@ -445,9 +449,9 @@ On first start the portal creates the SQLite DB and an active signing key on
 the volume; no bootstrap step is needed. Then check:
 
 ```bash
-curl -s https://shoveler-auth.osg.chtc.io/healthz
-curl -s https://shoveler-auth.osg.chtc.io/.well-known/openid-configuration
-curl -s https://shoveler-auth.osg.chtc.io/.well-known/jwks.json
+curl -s https://shoveler-auth.osgdev.chtc.io/healthz
+curl -s https://shoveler-auth.osgdev.chtc.io/.well-known/openid-configuration
+curl -s https://shoveler-auth.osgdev.chtc.io/.well-known/jwks.json
 ```
 
 and configure RabbitMQ as described above (`issuer`, `resource_server_id` and

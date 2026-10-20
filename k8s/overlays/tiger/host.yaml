@@ -7,7 +7,7 @@ metadata:
   name: shoveler-auth-portal
 spec:
   rules:
-    - host: shoveler-auth.osg.chtc.io
+    - host: shoveler-auth.osgdev.chtc.io
       http:
         paths:
           - path: /
@@ -19,7 +19,7 @@ spec:
                   name: http
   tls:
     - hosts:
-        - shoveler-auth.osg.chtc.io
+        - shoveler-auth.osgdev.chtc.io
       secretName: shoveler-auth-portal-certs
 ---
 apiVersion: cert-manager.io/v1
@@ -28,4 +28,4 @@ metadata:
   name: shoveler-auth-portal
 spec:
   dnsNames:
-    - shoveler-auth.osg.chtc.io
+    - shoveler-auth.osgdev.chtc.io

@@ -160,7 +160,8 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   overlay (`k8s/overlays/*/kustomization.yaml`). Full deploy steps: README
   "Deploying to Kubernetes".
 - k8s layout: kustomize `k8s/base` (generic) + `k8s/overlays/tiger` (tiger
-  cluster, namespace `osg`, context `dweitzel2-tiger-dex`, NOT the default
+  cluster, namespace `osgdev`, host `shoveler-auth.osgdev.chtc.io` (osgdev's
+  own Traefik), context `dweitzel2-tiger-dex`, NOT the default
   nautilus context). Non-secret settings live in the overlay's committed
   `config.env` (ConfigMap); secrets only as a SealedSecret made by
   `seal-secret.sh` from a gitignored `secret.env`. Never commit a plain Secret.

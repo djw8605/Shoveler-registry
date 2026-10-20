@@ -6,13 +6,13 @@
 #
 # Uses the tiger certificate offline: no cluster login needed. A sealed
 # secret only decrypts in the namespace it was sealed for (NAMESPACE, default
-# osg), so reseal if the overlay's namespace changes.
+# osgdev, matching the overlay), so reseal if the overlay's namespace changes.
 set -eu
 
 cert=${1:?usage: $0 /path/to/tiger-cert.pem [secret.env]}
 dir=$(cd "$(dirname "$0")" && pwd)
 env_file=${2:-$dir/secret.env}
-namespace=${NAMESPACE:-osg}
+namespace=${NAMESPACE:-osgdev}
 
 if grep -q REPLACE_ME "$env_file"; then
     echo "$env_file still contains REPLACE_ME values" >&2
