@@ -1,115 +1,108 @@
-"""Group-based authorization and per-user site visibility on the dashboard."""
+"""Only members of ADMIN_GROUP may use the portal; everyone else is refused."""
 
 from __future__ import annotations
 
 import re
 
+import pytest
+
 import portal.main as main_mod
-from helpers import seed_client
-from portal import authz
+from helpers import seed_client, seed_pending, seed_token
+from portal import authz, db, tokens
 from portal.auth import UserInfo
 
-ALICE = "http://cilogon.org/serverA/users/11111"  # nebraska
-BOB = "http://cilogon.org/serverA/users/22222"     # wisconsin
-
-# COmanage group memberships (the CILogon ``isMemberOf`` claim).
-ALICE_GROUPS = ("CO:members:active", "shoveler-nebraska")
-BOB_GROUPS = ("shoveler-wisconsin",)
-NOBODY_GROUPS = ("CO:members:active",)
-
-PREFIX = "shoveler-"
-# The registry-admin group (conftest) shares the site prefix, as in the docs.
-ADMIN = "shoveler-admins"
+ADMIN_GROUPS = ("CO:members:active", "shoveler-admins")  # conftest's ADMIN_GROUP
+OTHER_GROUPS = ("CO:members:active", "shoveler-nebraska")
 
 
-def test_sites_for_groups():
-    assert authz.sites_for_groups(ALICE_GROUPS, PREFIX, admin_group=ADMIN) == ["nebraska"]
-    assert authz.sites_for_groups(BOB_GROUPS, PREFIX, admin_group=ADMIN) == ["wisconsin"]
-    # A user in no site group (only built-in COmanage groups) manages nothing.
-    assert authz.sites_for_groups(NOBODY_GROUPS, PREFIX, admin_group=ADMIN) == []
-    assert authz.sites_for_groups((), PREFIX, admin_group=ADMIN) == []
-
-
-def test_sites_for_groups_multiple_and_deduped():
-    groups = ("shoveler-nebraska", "shoveler-wisconsin", "shoveler-nebraska")
-    assert authz.sites_for_groups(groups, PREFIX, admin_group=ADMIN) == ["nebraska", "wisconsin"]
-
-
-def test_sites_for_groups_ignores_empty_and_bare_prefix():
-    # A group equal to the bare prefix has no site suffix; ignore it.
-    assert authz.sites_for_groups(("shoveler-",), PREFIX, admin_group=ADMIN) == []
-
-
-def test_may_manage_site():
-    assert authz.may_manage_site(ALICE_GROUPS, PREFIX, "nebraska", admin_group=ADMIN)
-    assert not authz.may_manage_site(ALICE_GROUPS, PREFIX, "wisconsin", admin_group=ADMIN)
-
-
-def test_admin_group_is_not_a_site():
-    # "shoveler-admins" starts with the prefix but is the admin role, not site "admins".
-    groups = ("shoveler-admins", "shoveler-nebraska")
-    assert authz.sites_for_groups(groups, PREFIX, admin_group=ADMIN) == ["nebraska"]
-    assert not authz.may_manage_site(groups, PREFIX, "admins", admin_group=ADMIN)
-
-
-def test_without_admin_group_every_prefixed_group_is_a_site():
-    # With no REGISTRY_ADMIN_GROUP configured there is nothing to exclude.
-    assert authz.sites_for_groups(("shoveler-admins",), PREFIX, admin_group="") == ["admins"]
-
-
-def _seed(settings):
-    seed_client(settings, "shoveler-neb1", site="nebraska", owner_sub=ALICE,
-                owner_email="alice@unl.edu")
-    seed_client(settings, "shoveler-wis1", site="wisconsin", owner_sub=BOB,
-                owner_email="bob@wisc.edu")
-
-
-def test_dashboard_shows_only_user_sites(app, client, settings, monkeypatch):
-    _seed(settings)
+def _login(monkeypatch, groups):
     monkeypatch.setattr(
-        main_mod,
-        "current_user",
-        lambda session: UserInfo(ALICE, "alice@unl.edu", "Alice", ALICE_GROUPS),
+        main_mod, "current_user", lambda session: UserInfo("someone", "s@x.org", "S", groups)
     )
+
+
+def test_is_admin():
+    assert authz.is_admin("shoveler-admins", ADMIN_GROUPS)
+    assert not authz.is_admin("shoveler-admins", OTHER_GROUPS)
+    assert not authz.is_admin("shoveler-admins", ())
+    # An empty admin group admits nobody, even someone with an empty group.
+    assert not authz.is_admin("", ("",))
+
+
+def test_logged_out_sees_login_page(client):
+    resp = client.get("/")
+    assert "Log in with CILogon" in resp.text
+    assert client.get("/dashboard", follow_redirects=False).headers["location"] == "/"
+
+
+def test_non_admin_sees_not_authorized_and_no_data(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-neb1")
+    seed_pending(settings, "shoveler-pend1")
+    _login(monkeypatch, OTHER_GROUPS)
     resp = client.get("/dashboard")
-    assert resp.status_code == 200
-    body = resp.text
-    assert "shoveler-neb1" in body
-    assert "shoveler-wis1" not in body
-    assert "nebraska" in body
-    assert "wisconsin" not in body
+    assert "Not authorized" in resp.text
+    assert "shoveler-neb1" not in resp.text and "shoveler-pend1" not in resp.text
 
 
-def test_unauthorized_user_gets_not_authorized_page(app, client, settings, monkeypatch):
-    monkeypatch.setattr(
-        main_mod,
-        "current_user",
-        lambda session: UserInfo("nobody", None, None, NOBODY_GROUPS),
-    )
+def test_admin_sees_dashboard(client, settings, monkeypatch):
+    _login(monkeypatch, ADMIN_GROUPS)
     resp = client.get("/dashboard")
-    assert resp.status_code == 200
-    assert "Not yet authorized" in resp.text
+    assert "Registered shovelers" in resp.text and "Not authorized" not in resp.text
 
 
-def test_registry_admin_only_has_no_admins_site(app, client, settings, monkeypatch):
-    monkeypatch.setattr(
-        main_mod,
-        "current_user",
-        lambda session: UserInfo("carol", "c@x.org", "Carol", (settings.registry_admin_group,)),
-    )
-    resp = client.get("/dashboard")
-    # No site groups: the not-authorized page, not a card for a site "admins".
-    assert "Not yet authorized" in resp.text
-    assert 'name="site" value="admins"' not in resp.text
+def _state(settings):
+    conn = db.connect(settings.db_path)
+    try:
+        return (
+            db.get_client(conn, "shoveler-pend1"),
+            db.get_client(conn, "shoveler-neb1")["disabled"],
+            db.get_client(conn, "shoveler-off")["disabled"],
+            [dict(r) for r in db.list_registration_tokens(conn)],
+        )
+    finally:
+        conn.close()
 
 
-def test_cannot_create_registration_token_for_admin_group(app, client, settings, monkeypatch):
-    groups = (settings.registry_admin_group, "shoveler-nebraska")
-    monkeypatch.setattr(
-        main_mod, "current_user", lambda session: UserInfo("carol", "c@x.org", "Carol", groups)
-    )
+@pytest.mark.parametrize(
+    "path, form",
+    [
+        ("/pending/shoveler-pend1/approve", {"site": "nebraska"}),
+        ("/pending/shoveler-pend1/reject", {}),
+        ("/registration-tokens", {"site": "nebraska"}),
+        ("/registration-tokens/{token_hash}/revoke", {}),
+        ("/credentials/shoveler-neb1/disable", {}),
+        ("/credentials/shoveler-off/enable", {}),
+    ],
+)
+def test_non_admin_cannot_change_anything(client, settings, monkeypatch, path, form):
+    seed_pending(settings, "shoveler-pend1")
+    seed_client(settings, "shoveler-neb1")
+    seed_client(settings, "shoveler-off")
+    conn = db.connect(settings.db_path)
+    try:
+        db.disable_client(conn, "shoveler-off", "disabled-by-admin")
+    finally:
+        conn.close()
+    token = seed_token(settings)
+    path = path.format(token_hash=tokens.hash_registration_token(token))
+
+    # A real session CSRF token (taken as an admin), so only authz can refuse.
+    _login(monkeypatch, ADMIN_GROUPS)
     csrf = re.search(r'name="csrf_token" value="([^"]+)"', client.get("/dashboard").text).group(1)
-    resp = client.post("/registration-tokens", data={"site": "admins", "csrf_token": csrf})
-    assert resp.url.path == "/dashboard"
-    assert "You may not manage that site." in resp.text
+    before = _state(settings)
+
+    _login(monkeypatch, OTHER_GROUPS)
+    resp = client.post(path, data=dict(form, csrf_token=csrf))
+    assert "Not authorized" in resp.text
     assert 'id="token"' not in resp.text
+    assert _state(settings) == before
+
+
+def test_logged_out_post_redirects_to_login(client, settings):
+    seed_pending(settings, "shoveler-pend1")
+    resp = client.post(
+        "/pending/shoveler-pend1/approve",
+        data={"site": "nebraska", "csrf_token": "x"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303 and resp.headers["location"] == "/"

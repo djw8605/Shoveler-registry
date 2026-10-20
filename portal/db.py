@@ -11,13 +11,14 @@ from __future__ import annotations
 import os
 import sqlite3
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Optional
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS clients (
     client_id       TEXT PRIMARY KEY,
-    -- site/owner are NULL while pending: a shoveler that registered without a
-    -- token gets them when a site manager or registry admin approves it.
+    -- site is a display label set by an admin; owner_* records the admin who
+    -- approved it or minted its registration token. Both are NULL while a
+    -- token-less registration is pending.
     site            TEXT,
     owner_sub       TEXT,
     owner_email     TEXT,
@@ -119,21 +120,6 @@ def get_client(conn: sqlite3.Connection, client_id: str) -> Optional[sqlite3.Row
     return cur.fetchone()
 
 
-def list_clients_for_sites(
-    conn: sqlite3.Connection, sites: Iterable[str]
-) -> list[sqlite3.Row]:
-    sites = list(sites)
-    if not sites:
-        return []
-    placeholders = ",".join("?" for _ in sites)
-    cur = conn.execute(
-        f"SELECT * FROM clients WHERE site IN ({placeholders}) "
-        f"ORDER BY site, created_at DESC",
-        sites,
-    )
-    return cur.fetchall()
-
-
 def list_all_clients(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     """Every approved client across all sites (registry-admin view)."""
     cur = conn.execute(
@@ -204,7 +190,7 @@ def approve_client(
     owner_sub: str,
     owner_email: Optional[str],
 ) -> bool:
-    """Bind a pending client to a site; the approver becomes its owner.
+    """Approve a pending client, labelling its site and recording the approver.
 
     Returns False if the client isn't pending (already approved or rejected).
     """
@@ -287,18 +273,8 @@ def get_registration_token(
     return cur.fetchone()
 
 
-def list_registration_tokens_for_sites(
-    conn: sqlite3.Connection, sites: Iterable[str]
-) -> list[sqlite3.Row]:
-    sites = list(sites)
-    if not sites:
-        return []
-    placeholders = ",".join("?" for _ in sites)
-    cur = conn.execute(
-        f"SELECT * FROM registration_tokens WHERE site IN ({placeholders}) "
-        f"ORDER BY site, created_at DESC",
-        sites,
-    )
+def list_registration_tokens(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    cur = conn.execute("SELECT * FROM registration_tokens ORDER BY created_at DESC")
     return cur.fetchall()
 
 

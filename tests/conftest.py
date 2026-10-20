@@ -33,10 +33,8 @@ def settings(tmp_path) -> Settings:
         allow_pending_registration=True,
         max_pending_clients=100,
         pending_client_ttl_seconds=604800,
-        # A COmanage group named "shoveler-<site>" grants management of <site>;
-        # membership in "shoveler-admins" grants the registry-wide admin role.
-        comanage_group_prefix="shoveler-",
-        registry_admin_group="shoveler-admins",
+        # Members of this COmanage group are the only users of the portal.
+        admin_group="shoveler-admins",
     )
 
 

@@ -209,7 +209,7 @@ def test_replayed_assertion_is_rejected(client, settings, key):
 def test_disabled_client_is_rejected(client, settings, key):
     conn = db.connect(settings.db_path)
     try:
-        db.disable_client(conn, CID, "revoked-by-owner")
+        db.disable_client(conn, CID, "disabled-by-admin")
     finally:
         conn.close()
     _assert_invalid_client(_post(client, make_assertion(key, CID, _aud(settings))))

@@ -63,22 +63,18 @@ class Settings:
     # Reject client assertions whose exp is further than this in the future.
     assertion_max_lifetime_seconds: int
     # Token-less registration: a shoveler that registers without a token is
-    # held as pending until a site manager or registry admin approves it.
+    # held as pending until an admin approves it.
     allow_pending_registration: bool
     # At most this many pending clients at once (bounds open registration).
     max_pending_clients: int
     # Pending clients not approved within this long are deleted (expire job).
     pending_client_ttl_seconds: int
 
-    # --- COmanage group-based authorization ---
-    # Site authorization comes from the CILogon ``isMemberOf`` claim (the
-    # COmanage groups the user belongs to). A group named
-    # ``<comanage_group_prefix><site>`` grants management of ``<site>``; the
-    # site name is the part of the group name after the prefix.
-    comanage_group_prefix: str
-    # Membership in this COmanage group grants registry-wide admin (sees all
-    # sites at /admin, may disable any client). Empty disables the admin view.
-    registry_admin_group: str
+    # --- Authorization ---
+    # Members of this COmanage group (CILogon ``isMemberOf`` claim) are the
+    # only people who can log in: they approve shovelers, mint registration
+    # tokens, and disable/re-enable shovelers.
+    admin_group: str
 
     @property
     def redirect_uri(self) -> str:
@@ -133,6 +129,5 @@ def get_settings() -> Settings:
         pending_client_ttl_seconds=int(
             os.environ.get("PENDING_CLIENT_TTL_SECONDS", "604800")
         ),
-        comanage_group_prefix=os.environ.get("COMANAGE_GROUP_PREFIX", "shoveler-"),
-        registry_admin_group=os.environ.get("REGISTRY_ADMIN_GROUP", "").strip(),
+        admin_group=_require("ADMIN_GROUP").strip(),
     )

@@ -1,20 +1,19 @@
 """Dynamic client registration (RFC 7591 request format) for shovelers.
 
-A site operator mints a one-time registration token on the dashboard. The
-shoveler generates its own RSA keypair and POSTs its PUBLIC key to /register
-with that token as a bearer token. The token is spent and a client bound to
-the token's site is created; from then on the shoveler authenticates at
-/token with ``private_key_jwt`` (see tokens.py). No shared secret exists.
+The shoveler generates its own RSA keypair and POSTs its PUBLIC key to
+/register; from then on it authenticates at /token with ``private_key_jwt``
+(see tokens.py). No shared secret exists. Two ways in:
 
-Being minted by a member of ``<prefix><site>`` is the approval: the new client
-is active immediately. RFC 7592 client management is deliberately not offered,
-so no ``registration_access_token`` is ever issued.
+* Without a token (no Authorization header; the usual way, while
+  ALLOW_PENDING_REGISTRATION is on): the client is pending, with no site, and
+  /token answers ``authorization_pending`` until an admin approves it on the
+  dashboard and labels its site.
+* With a one-time registration token an admin minted (bearer token): the
+  token is spent and the client is active at once, labelled with the token's
+  site. A present but bad token is always 401; it never falls back to pending.
 
-A shoveler may also register WITHOUT a token (no Authorization header, when
-ALLOW_PENDING_REGISTRATION is on). It then gets a pending client with no site:
-/token answers ``authorization_pending`` until a site manager or registry admin
-approves it on the dashboard and picks its site. A present but bad token is
-always 401; it never falls back to pending.
+RFC 7592 client management is deliberately not offered, so no
+``registration_access_token`` is ever issued.
 """
 
 from __future__ import annotations

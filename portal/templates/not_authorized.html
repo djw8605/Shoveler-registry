@@ -6,10 +6,11 @@
 <div class="mx-auto max-w-md">
   {% call ui.card() %}
     <div class="space-y-4 text-center">
-      <h1 class="text-lg font-semibold text-slate-900">Not yet authorized</h1>
+      <h1 class="text-lg font-semibold text-slate-900">Not authorized</h1>
       <p class="text-sm leading-6 text-slate-600">
-        Your account isn't a member of any site group yet. To manage shoveler
-        credentials, ask the central admin to add you to your site's COmanage group.
+        Only registry admins can use this portal. You don't need an account to run
+        a shoveler: start it and it registers itself, then waits for an admin to
+        approve it.
       </p>
       <p class="text-sm text-slate-600">
         Contact: <span class="font-medium text-slate-900">{{ admin_contact }}</span>

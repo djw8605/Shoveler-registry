@@ -82,10 +82,10 @@ def test_already_disabled_rows_untouched(settings):
     _insert(settings, "shoveler-revoked", last_used=_iso(1))
     conn = db.connect(settings.db_path)
     try:
-        db.disable_client(conn, "shoveler-revoked", "revoked-by-owner")
+        db.disable_client(conn, "shoveler-revoked", "disabled-by-admin")
         expire.find_and_disable_idle(conn, settings.idle_days)
         # Reason stays as the owner's revocation, not overwritten by "idle".
-        assert db.get_client(conn, "shoveler-revoked")["disabled_reason"] == "revoked-by-owner"
+        assert db.get_client(conn, "shoveler-revoked")["disabled_reason"] == "disabled-by-admin"
     finally:
         conn.close()
 

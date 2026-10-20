@@ -26,7 +26,7 @@
 {% macro badge(status) %}
   {%- if status in ("active", "used") -%}
     {%- set cls = "bg-green-50 text-green-700 ring-green-600/20" -%}
-  {%- elif status in ("idle", "pending") -%}
+  {%- elif status in ("idle", "unused") -%}
     {%- set cls = "bg-amber-50 text-amber-700 ring-amber-600/30" -%}
   {%- else -%}
     {%- set cls = "bg-red-50 text-red-700 ring-red-600/20" -%}
@@ -49,12 +49,11 @@
   {% endif %}
 {% endmacro %}
 
-{# Shoveler registrations awaiting approval. With `sites`, the approver picks one
-   of their own sites; without (registry admin), they type any site, with
-   `known_sites` as suggestions. #}
-{% macro pending_table(pending, csrf_token, return_to, sites=None, known_sites=()) %}
+{# Shoveler registrations awaiting approval. The admin labels the site when
+   approving (suggestions from `known_sites`, rendered once as #known-sites). #}
+{% macro pending_table(pending, csrf_token) %}
   <p class="mb-3 text-sm text-slate-600">
-    These shovelers registered without a token and can't send data until approved.
+    These shovelers registered themselves and can't send data until approved.
     Approve only one you recognise: its <code class="font-mono text-xs">client_id</code>
     appears in the shoveler's log ("registration complete, client_id: …").
   </p>
@@ -83,22 +82,14 @@
                 <form method="post" action="/pending/{{ p.client_id }}/approve" class="flex items-center gap-2"
                       onsubmit="return confirm('Approve {{ p.client_id }} for site ' + this.site.value + '? It will start receiving tokens.');">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                  <input type="hidden" name="return_to" value="{{ return_to }}" />
-                  {% if sites %}
-                    <select name="site" aria-label="Site" class="rounded-md border-slate-300 py-1.5 text-sm">
-                      {% for s in sites %}<option value="{{ s }}">{{ s }}</option>{% endfor %}
-                    </select>
-                  {% else %}
-                    <input type="text" name="site" required maxlength="100" placeholder="site"
-                           aria-label="Site" list="known-sites"
-                           class="w-32 rounded-md border-slate-300 py-1.5 text-sm" />
-                  {% endif %}
+                  <input type="text" name="site" required maxlength="100" placeholder="site"
+                         aria-label="Site" list="known-sites"
+                         class="w-32 rounded-md border-slate-300 py-1.5 text-sm" />
                   {{ button("Approve", "submit", "primary") }}
                 </form>
                 <form method="post" action="/pending/{{ p.client_id }}/reject"
                       onsubmit="return confirm('Reject {{ p.client_id }}? Its registration is deleted; it would have to register again.');">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                  <input type="hidden" name="return_to" value="{{ return_to }}" />
                   {{ button("Reject", "submit", "danger") }}
                 </form>
               </div>
@@ -108,9 +99,4 @@
       </tbody>
     </table>
   </div>
-  {% if not sites %}
-    <datalist id="known-sites">
-      {% for s in known_sites %}<option value="{{ s }}"></option>{% endfor %}
-    </datalist>
-  {% endif %}
 {% endmacro %}

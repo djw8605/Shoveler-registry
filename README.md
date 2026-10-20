@@ -10,13 +10,13 @@ Python.
 
 It does four things:
 
-1. **Self-service portal** (browser, CILogon login) — operators create one-time
-   **registration tokens** for their site, **approve** shovelers that registered
-   without one, and disable / re-enable the shovelers of their sites.
+1. **Admin portal** (browser, CILogon login, members of one COmanage admin
+   group only) — admins **approve** or reject shovelers that registered
+   themselves, label each with its site, create one-time **registration
+   tokens**, and disable / re-enable shovelers. Site operators never log in.
 2. **Registration endpoint** (`POST /register`) — a shoveler sends its **public
-   key** (RFC 7591 request format). With a registration token it gets a
-   `client_id` bound to that site at once; without one it waits as **pending**
-   until a site manager or registry admin approves it and picks its site.
+   key** (RFC 7591 request format) and waits as **pending** until an admin
+   approves it. With an admin-made registration token it is active at once.
 3. **Token endpoint** (`POST /token`) — OAuth2 `client_credentials` grant,
    authenticated with a JWT signed by the shoveler's private key
    (`private_key_jwt`, RFC 7523) → signed access token. The **JWKS endpoint**
@@ -45,7 +45,7 @@ portal/
   keys.py       key gen/load, JWKS, rotation CLI
   registration.py  /register: registration tokens, pending (token-less) registration, metadata validation
   tokens.py     /token private_key_jwt verification, claim building, rate limiting
-  authz.py      COmanage group-based site authorization
+  authz.py      the one COmanage admin group
   auth.py       CILogon OIDC relying-party flow + session (captures isMemberOf)
   main.py       FastAPI app, routes, middleware, CSRF
   expire.py     expiry subcommand (idle clients, stale pending registrations)
@@ -73,7 +73,6 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `SESSION_SECRET` | _required_ | Signs the session cookie |
 | `DB_PATH` | `./data/portal.db` | SQLite file |
 | `SIGNING_KEY_DIR` | `./data/keys` | Signing keys + `manifest.json` |
-| `COMANAGE_GROUP_PREFIX` | `shoveler-` | Group-name prefix; site = group name after the prefix |
 | `TOKEN_ISSUER` | _required_ | JWT `iss` (= RabbitMQ `auth_oauth2.issuer`) |
 | `RESOURCE_SERVER_ID` | _required_ | JWT `aud` (= RabbitMQ `auth_oauth2.resource_server_id`), exact |
 | `TOKEN_TTL_SECONDS` | `14400` | JWT lifetime (4h) |
@@ -81,7 +80,7 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `SCOPE_VALUE` | `my_rabbit_server.write:*/xrd-shoveled` | Permission written into the scope claim |
 | `IDLE_DAYS` | `30` | Idle-expiry threshold |
 | `ADMIN_CONTACT` | _generic_ | Shown on the not-authorized page |
-| `REGISTRY_ADMIN_GROUP` | _empty_ | COmanage group whose members are registry-wide admins |
+| `ADMIN_GROUP` | _required_ | COmanage group whose members may log in and manage shovelers |
 | `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW` | `30` / `60` | Per-`client_id` `/token` rate limit |
 | `REGISTRATION_TOKEN_TTL_SECONDS` | `259200` | Lifetime of a one-time registration token (72h) |
 | `REGISTER_RATE_LIMIT` / `REGISTER_RATE_WINDOW` | `10` / `60` | Per-client-IP `/register` rate limit |
@@ -102,7 +101,7 @@ Register a **confidential** OIDC client at <https://cilogon.org/oauth2/register>
 CILogon issues the `client_id`/`client_secret`; set them as
 `CILOGON_CLIENT_ID` / `CILOGON_CLIENT_SECRET`. The `sub` claim is the stable
 identity; the `isMemberOf` claim carries the user's COmanage group memberships
-(used for authorization, below). The ID token is fully validated (signature via
+(used to check `ADMIN_GROUP`, below). The ID token is fully validated (signature via
 CILogon's JWKS, plus `iss`/`aud`/`exp`/`nonce`).
 
 > The `org.cilogon.userinfo` scope (already requested) is what releases
@@ -110,39 +109,27 @@ CILogon's JWKS, plus `iss`/`aud`/`exp`/`nonce`).
 > userinfo endpoint rather than in the ID token, the portal fetches it from
 > there automatically.
 
-## Authorization (COmanage groups)
+## Authorization (one admin group)
 
-Who may manage which site is driven by the user's **COmanage group
-memberships**, delivered by CILogon in the `isMemberOf` claim. There is no
-local allow-list file to maintain: access follows directly from the groups the
-central admin manages in COmanage.
+Only members of the COmanage group named in `ADMIN_GROUP`, delivered by
+CILogon in the `isMemberOf` claim, can use the portal. Anyone else who logs in
+sees a "not authorized" page naming `${ADMIN_CONTACT}`. Site operators don't
+need accounts: they just run shovelers, which register themselves.
 
-**Convention:** a group named `<COMANAGE_GROUP_PREFIX><site>` grants management
-of `<site>`. With the default `shoveler-` prefix, membership in the COmanage
-group `shoveler-nebraska` lets a user manage site `nebraska`. The site name is
-the part of the group name after the prefix; groups that don't start with the
-prefix (e.g. COmanage's built-in `CO:members:active`) are ignored. The
-`REGISTRY_ADMIN_GROUP` is never a site group, even when it starts with the
-prefix: `shoveler-admins` makes its members registry admins, not managers of a
-site called `admins`.
+Admins see one dashboard with:
 
-Group memberships are captured into the session **at login**, so changes in
-COmanage take effect on the user's next login rather than instantly. A user
-who is in no site group sees a friendly "not yet authorized; contact
-`${ADMIN_CONTACT}`" page.
+- **Awaiting approval:** shovelers that registered without a token, with their
+  `client_id`, name, key thumbprint, source IP and time. **Approve** asks for a
+  site label (known sites are suggested); **Reject** deletes the registration.
+- **Registered shovelers:** every approved shoveler (site, `client_id`, name,
+  key thumbprint, who approved it, status, created, last used), with
+  **Disable** (`disabled_reason='disabled-by-admin'`) and **Re-enable**.
+- **Registration tokens:** create a one-time token for a site, for a shoveler
+  that should be active without a separate approval; revoke unused ones.
 
-### Registry-wide admins
-
-Site operators see only their own sites. Members of the COmanage group named in
-`REGISTRY_ADMIN_GROUP` are **registry-wide admins**: they get an **Admin** link
-to `GET /admin`, a read-only table of *every* registered shoveler across *all*
-sites (site, `client_id`, name, key thumbprint, owner email, status, created,
-last_used). It makes idle/dead sites easy to scan. Admins may also disable any
-client (`disabled_reason='revoked-by-admin'`). The owner can't re-enable an
-admin-disabled client, since it may have a compromised key: recovery is a new
-registration token. Admins also see shovelers awaiting approval and may
-approve one into **any** site (typed in, with known sites suggested) or reject
-it. Leave `REGISTRY_ADMIN_GROUP` empty to disable the admin view entirely.
+A site is only a label for grouping and display; it grants nobody access.
+Group memberships are captured into the session **at login**, so COmanage
+changes take effect on the user's next login.
 
 ## Local development
 
@@ -157,7 +144,7 @@ npm run build:css          # one-shot, minified
 npm run watch:css          # rebuild on change (run alongside uvicorn)
 
 # 3. Config
-cp .env.example .env       # fill in CILOGON_*, SESSION_SECRET, COMANAGE_GROUP_PREFIX, etc.
+cp .env.example .env       # fill in CILOGON_*, SESSION_SECRET, ADMIN_GROUP, etc.
 set -a; . ./.env; set +a   # export the vars into your shell
 
 # 4. Run (factory mode — create_app() reads settings from the env)
@@ -173,12 +160,12 @@ Run the tests with `pytest`.
 The shoveler generates an RSA keypair locally and registers the **public** key.
 There are two ways:
 
-- **With a registration token** (bearer token from the dashboard): the client
-  is active immediately, bound to the token's site.
-- **Without a token** (no `Authorization` header at all): the client is
-  **pending**, with no site. It can't get access tokens until a site manager
-  approves it into one of their sites, or a registry admin into any site, on
-  the dashboard. The approver becomes its owner. Rejecting it deletes it.
+- **Without a token** (no `Authorization` header at all; the usual way): the
+  client is **pending**, with no site. It can't get access tokens until an
+  admin approves it on the dashboard and labels its site. Rejecting it deletes
+  it.
+- **With a registration token** an admin created (bearer token): the client is
+  active immediately, labelled with the token's site.
 
 ```http
 POST /register
@@ -200,12 +187,12 @@ scope is ignored).
 
 With a token:
 
-- Being minted by a member of `<COMANAGE_GROUP_PREFIX><site>` is the approval,
-  so the client is active immediately.
+- An admin creating the token is the approval, so the client is active
+  immediately.
 - The token is **single-use** and expires after `REGISTRATION_TOKEN_TTL_SECONDS`.
   Spending it and creating the client happen in one transaction, so of two
-  concurrent uses exactly one succeeds. Until it is used, **any** manager of
-  its site (not only its creator) can revoke it on the dashboard.
+  concurrent uses exactly one succeeds. Until it is used, any admin can revoke
+  it on the dashboard.
 - An unknown, expired, revoked or already-used token, or any `Authorization`
   header that isn't `Bearer <token>`, gets `401 {"error":"invalid_token"}` with
   `WWW-Authenticate: Bearer error="invalid_token"`. A bad token never falls back
@@ -229,7 +216,7 @@ Without a token (pending):
   answers `503 {"error":"temporarily_unavailable"}` with `Retry-After`.
 - The dashboard lists pending shovelers with their `client_id`, name, key
   thumbprint, source IP and time. The shoveler logs its `client_id` when it
-  registers, so the approver can match the two before approving.
+  registers, so the admin can match the two before approving.
 - Pending registrations nobody approves within `PENDING_CLIENT_TTL_SECONDS`
   are deleted by the nightly expire job.
 
@@ -300,10 +287,8 @@ equal the token's `aud` **exactly**, and the permission lives in the
 
 ## Shoveler configuration
 
-Requires a shoveler with OAuth self-registration support (`amqp.oauth`). On the
-dashboard, click **Create registration token** for the site. The one-time page
-shows the token and a ready-to-paste snippet (merge it into the `amqp:` section
-alongside your RabbitMQ `url` / `exchange`):
+Requires a shoveler with OAuth self-registration support (`amqp.oauth`). Add
+this to the `amqp:` section alongside your RabbitMQ `url` / `exchange`:
 
 ```yaml
 amqp:
@@ -311,28 +296,29 @@ amqp:
     enabled: true
     token_url: https://shoveler-auth.osg.example/token
     registration_url: https://shoveler-auth.osg.example/register
-    bootstrap_token_file: /etc/xrootd-monitoring-shoveler/oauth/bootstrap.token
-    client_name: nebraska
 ```
 
-Write the token to `bootstrap.token` with mode `0600`, readable by the user the
-shoveler runs as. On first start the shoveler generates its key, registers, and
-starts writing access tokens to `amqp.token_location`. After that first
-successful start the token file can be deleted.
-
-**Without a token:** configure only `enabled`, `token_url` and
-`registration_url` and start the shoveler. It registers as pending, logs its
-`client_id`, queues data on disk and polls. Find that `client_id` under
-**Awaiting approval** on the dashboard, check it against the shoveler's log,
-and approve it into your site; the shoveler starts sending within a minute.
-(This needs a shoveler that can start without a bootstrap token and omits the
+On first start the shoveler generates its key, registers as pending, logs its
+`client_id`, queues data on disk and polls. Send that `client_id` to a
+registry admin, who finds it under **Awaiting approval**, checks it and
+approves it with the site label; the shoveler starts sending within a minute
+and writes access tokens to `amqp.token_location` from then on. (This needs a
+shoveler that can start without a bootstrap token and omits the
 `Authorization` header when it has none.)
+
+**With a registration token** (to skip the approval step): an admin creates
+one for the site on the dashboard. The one-time page shows the token, how to
+install it, and the same snippet with
+`bootstrap_token_file: /etc/xrootd-monitoring-shoveler/oauth/bootstrap.token`
+added. Write the token there with mode `0600`, readable by the user the
+shoveler runs as; the shoveler is active as soon as it registers, and the file
+can be deleted after that first start.
 
 The shoveler persists its private key and `client_id` under
 `/etc/xrootd-monitoring-shoveler/oauth/`. **That directory must survive
 restarts and redeploys** (e.g. a persistent volume for a containerised
-shoveler). If it is lost, register again (with a new registration token, or
-without one and approve it); the old client can be disabled on the dashboard.
+shoveler). If it is lost, the shoveler registers again as a new pending
+client; an admin can disable the old one.
 
 ## Signing keys & rotation
 
@@ -364,12 +350,11 @@ python -m portal.expire
 
 Disables credentials whose reference time (`last_used_at`, or `created_at` if
 never used) is older than `IDLE_DAYS`, setting `disabled_reason='idle'`. Rows
-are never deleted (audit + recovery). **Recovery is self-service:** the owner
-logs in and clicks **Re-enable**, which clears the disabled flag; the shoveler
-keeps its key and `client_id`, so nothing changes on its side. Owners can also
-re-enable clients they disabled themselves, but **not** ones a registry admin
-disabled (`revoked-by-admin`): that may mean a compromised key, so recovery is
-a new registration token (a new client and key). The same job deletes pending
+are never deleted (audit + recovery). To recover, an admin clicks
+**Re-enable**, which clears the disabled flag; the shoveler keeps its key and
+`client_id` and picks it up on its next 60-second retry, so nothing changes on
+its side. (If a key may be compromised, disable that shoveler and have it
+register again with a new key instead.) The same job deletes pending
 registrations nobody approved within `PENDING_CLIENT_TTL_SECONDS`. Deploy it
 via [`k8s/base/cronjob.yaml`](./k8s/base/cronjob.yaml) or cron.
 
@@ -415,9 +400,8 @@ Prerequisites:
   `/.well-known/jwks.json` over https.
 - A CILogon confidential client whose redirect URI is
   `<PORTAL_BASE_URL>/auth/callback` (see above).
-- COmanage groups named `<COMANAGE_GROUP_PREFIX><site>` (plus the
-  `REGISTRY_ADMIN_GROUP`, if used), released to the portal's CILogon client in
-  the `isMemberOf` claim (see Authorization above).
+- A COmanage group for the registry admins (`ADMIN_GROUP`), released to the
+  portal's CILogon client in the `isMemberOf` claim (see Authorization above).
 - A published image tag (see Docker above); the overlay pins `:0.1.0`.
 - `kubeseal` and the cluster's sealed-secrets certificate (for tiger,
   `tiger-cert.pem` in tiger-osg-config).
@@ -501,7 +485,7 @@ Notes:
 - Session cookies are `HttpOnly`, `SameSite=Lax`, and `Secure` when
   `PORTAL_BASE_URL` is https.
 - Token-less registration only creates a **pending** client with no site and
-  no access; a human who manages a site (or a registry admin) must approve it.
+  no access; a member of `ADMIN_GROUP` must approve it.
   It is capped (`MAX_PENDING_CLIENTS`), expires, and can be turned off
   (`ALLOW_PENDING_REGISTRATION=false`). `/token` reveals pending status only to
   the holder of the registered private key.

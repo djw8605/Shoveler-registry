@@ -5,129 +5,138 @@
 {% block content %}
 <div class="space-y-6">
   <div>
-    <h1 class="text-xl font-semibold tracking-tight text-slate-900">Your sites</h1>
+    <h1 class="text-xl font-semibold tracking-tight text-slate-900">Shovelers</h1>
     <p class="mt-1 text-sm text-slate-500">
-      To add a shoveler, either create a registration token and give it to the
-      shoveler (it is active as soon as it registers), or start the shoveler without
-      one and approve it below. Either way it registers its own key; no secret is
-      ever shared.
+      Shovelers register themselves and wait here for approval. To let one in without
+      a separate approval, create a registration token for it instead. Either way it
+      registers its own key; no secret is ever shared.
     </p>
   </div>
 
+  <datalist id="known-sites">
+    {% for s in known_sites %}<option value="{{ s }}"></option>{% endfor %}
+  </datalist>
+
   {% if pending %}
     {% call ui.card(title="Awaiting approval (" ~ pending|length ~ ")") %}
-      {{ ui.pending_table(pending, csrf_token, "/dashboard", sites=sites) }}
+      {{ ui.pending_table(pending, csrf_token) }}
     {% endcall %}
   {% endif %}
 
-  {% for site in sites %}
-    {% call ui.card(title=site) %}
-      <form method="post" action="/registration-tokens" class="mb-4">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-        <input type="hidden" name="site" value="{{ site }}" />
-        {{ ui.button("Create registration token", "submit", "primary") }}
-      </form>
-
-      {% set reg_tokens = tokens_by_site[site] %}
-      {% if reg_tokens %}
-        <h3 class="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Registration tokens</h3>
-        <div class="mb-6 overflow-x-auto">
-          <table class="min-w-full divide-y divide-slate-200 text-sm">
-            <thead>
-              <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
-                <th class="py-2 pr-4">Created</th>
-                <th class="py-2 pr-4">Expires</th>
-                <th class="py-2 pr-4">Created by</th>
-                <th class="py-2 pr-4">Status</th>
-                <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
-              </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-100">
-              {% for t in reg_tokens %}
-                <tr>
-                  <td class="py-3 pr-4 text-slate-600">{{ t.created_at[:16] | replace("T", " ") }}</td>
-                  <td class="py-3 pr-4 text-slate-600">{{ t.expires_at[:16] | replace("T", " ") }}</td>
-                  <td class="py-3 pr-4 text-slate-600">{{ t.owner_email or "—" }}</td>
-                  <td class="py-3 pr-4">
-                    {{ ui.badge(t.status) }}
-                    {% if t.client_id %}
-                      <span class="ml-1 font-mono text-xs text-slate-500">&rarr; {{ t.client_id }}</span>
+  {% call ui.card(title="Registered shovelers") %}
+    {% if clients %}
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <thead>
+            <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
+              <th class="py-2 pr-4">Site</th>
+              <th class="py-2 pr-4">client_id</th>
+              <th class="py-2 pr-4">Name</th>
+              <th class="py-2 pr-4">Key</th>
+              <th class="py-2 pr-4">Approved by</th>
+              <th class="py-2 pr-4">Status</th>
+              <th class="py-2 pr-4">Created</th>
+              <th class="py-2 pr-4">Last used</th>
+              <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            {% for c in clients %}
+              <tr>
+                <td class="py-3 pr-4 font-medium text-slate-900">{{ c.site }}</td>
+                <td class="py-3 pr-4 font-mono text-xs text-slate-900">{{ c.client_id }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ c.client_name or "—" }}</td>
+                <td class="py-3 pr-4 font-mono text-xs text-slate-500" title="RFC 7638 key thumbprint">{{ c.thumbprint }}…</td>
+                <td class="py-3 pr-4 text-slate-600">{{ c.owner_email or "—" }}</td>
+                <td class="py-3 pr-4">
+                  {{ ui.badge(c.status) }}
+                  {% if c.disabled_reason %}
+                    <span class="ml-1 text-xs text-slate-400">({{ c.disabled_reason }})</span>
+                  {% endif %}
+                </td>
+                <td class="py-3 pr-4 text-slate-600">{{ c.created_at[:10] }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ c.last_used_at[:16] | replace("T", " ") if c.last_used_at else "—" }}</td>
+                <td class="py-3 pr-4">
+                  <div class="flex justify-end">
+                    {% if c.status != "disabled" %}
+                    <form method="post" action="/credentials/{{ c.client_id }}/disable"
+                          onsubmit="return confirm('Disable {{ c.client_id }} ({{ c.site }})? The shoveler will stop getting tokens.');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                      {{ ui.button("Disable", "submit", "danger") }}
+                    </form>
+                    {% else %}
+                    <form method="post" action="/credentials/{{ c.client_id }}/enable"
+                          onsubmit="return confirm('Re-enable {{ c.client_id }}? The shoveler can get tokens again with its existing key.');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                      {{ ui.button("Re-enable", "submit", "secondary") }}
+                    </form>
                     {% endif %}
-                  </td>
-                  <td class="py-3 pr-4">
-                    <div class="flex justify-end">
-                      {% if t.status == "pending" %}
-                      <form method="post" action="/registration-tokens/{{ t.token_hash }}/revoke"
-                            onsubmit="return confirm('Revoke this registration token? A shoveler that has not registered yet will no longer be able to.');">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                        {{ ui.button("Revoke", "submit", "danger") }}
-                      </form>
-                      {% endif %}
-                    </div>
-                  </td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      {% endif %}
-
-      {% set clients = by_site[site] %}
-      <h3 class="mb-1 text-xs font-medium uppercase tracking-wide text-slate-500">Registered shovelers</h3>
-      {% if clients %}
-        <div class="overflow-x-auto">
-          <table class="min-w-full divide-y divide-slate-200 text-sm">
-            <thead>
-              <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
-                <th class="py-2 pr-4">client_id</th>
-                <th class="py-2 pr-4">Name</th>
-                <th class="py-2 pr-4">Key</th>
-                <th class="py-2 pr-4">Status</th>
-                <th class="py-2 pr-4">Created</th>
-                <th class="py-2 pr-4">Last used</th>
-                <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
+                  </div>
+                </td>
               </tr>
-            </thead>
-            <tbody class="divide-y divide-slate-100">
-              {% for c in clients %}
-                <tr>
-                  <td class="py-3 pr-4 font-mono text-xs text-slate-900">{{ c.client_id }}</td>
-                  <td class="py-3 pr-4 text-slate-600">{{ c.client_name or "—" }}</td>
-                  <td class="py-3 pr-4 font-mono text-xs text-slate-500" title="RFC 7638 key thumbprint">{{ c.thumbprint }}…</td>
-                  <td class="py-3 pr-4">
-                    {{ ui.badge(c.status) }}
-                    {% if c.disabled_reason %}
-                      <span class="ml-1 text-xs text-slate-400">({{ c.disabled_reason }})</span>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-sm text-slate-500">No shovelers registered yet.</p>
+    {% endif %}
+  {% endcall %}
+
+  {% call ui.card(title="Registration tokens") %}
+    <form method="post" action="/registration-tokens" class="mb-4 flex items-center gap-2">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+      <input type="text" name="site" required maxlength="100" placeholder="site"
+             aria-label="Site" list="known-sites"
+             class="w-40 rounded-md border-slate-300 py-1.5 text-sm" />
+      {{ ui.button("Create registration token", "submit", "primary") }}
+    </form>
+
+    {% if reg_tokens %}
+      <div class="overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <thead>
+            <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
+              <th class="py-2 pr-4">Site</th>
+              <th class="py-2 pr-4">Created</th>
+              <th class="py-2 pr-4">Expires</th>
+              <th class="py-2 pr-4">Created by</th>
+              <th class="py-2 pr-4">Status</th>
+              <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            {% for t in reg_tokens %}
+              <tr>
+                <td class="py-3 pr-4 font-medium text-slate-900">{{ t.site }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ t.created_at[:16] | replace("T", " ") }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ t.expires_at[:16] | replace("T", " ") }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ t.owner_email or "—" }}</td>
+                <td class="py-3 pr-4">
+                  {{ ui.badge(t.status) }}
+                  {% if t.client_id %}
+                    <span class="ml-1 font-mono text-xs text-slate-500">&rarr; {{ t.client_id }}</span>
+                  {% endif %}
+                </td>
+                <td class="py-3 pr-4">
+                  <div class="flex justify-end">
+                    {% if t.status == "unused" %}
+                    <form method="post" action="/registration-tokens/{{ t.token_hash }}/revoke"
+                          onsubmit="return confirm('Revoke this registration token? A shoveler that has not registered with it yet no longer can.');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+                      {{ ui.button("Revoke", "submit", "danger") }}
+                    </form>
                     {% endif %}
-                  </td>
-                  <td class="py-3 pr-4 text-slate-600">{{ c.created_at[:10] }}</td>
-                  <td class="py-3 pr-4 text-slate-600">{{ c.last_used_at[:16] | replace("T", " ") if c.last_used_at else "—" }}</td>
-                  <td class="py-3 pr-4">
-                    <div class="flex justify-end gap-2">
-                      {% if c.status != "disabled" %}
-                      <form method="post" action="/credentials/{{ c.client_id }}/disable"
-                            onsubmit="return confirm('Disable {{ c.client_id }}? The shoveler will stop getting tokens.');">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                        {{ ui.button("Disable", "submit", "danger") }}
-                      </form>
-                      {% elif c.can_reenable %}
-                      <form method="post" action="/credentials/{{ c.client_id }}/enable"
-                            onsubmit="return confirm('Re-enable {{ c.client_id }}? The shoveler can get tokens again with its existing key.');">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                        {{ ui.button("Re-enable", "submit", "secondary") }}
-                      </form>
-                      {% endif %}
-                    </div>
-                  </td>
-                </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      {% else %}
-        <p class="text-sm text-slate-500">No shovelers registered yet for this site.</p>
-      {% endif %}
-    {% endcall %}
-  {% endfor %}
+                  </div>
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p class="text-sm text-slate-500">No registration tokens yet.</p>
+    {% endif %}
+  {% endcall %}
 </div>
 {% endblock %}

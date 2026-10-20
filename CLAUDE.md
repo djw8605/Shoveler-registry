@@ -6,12 +6,12 @@ Guidance for working in this repo. Keep it current when conventions change.
 
 A small, self-contained **OAuth2 token issuer** for the
 `xrootd-monitoring-shoveler` (replaces a Keycloak deployment). Site operators
-log in with CILogon and either mint a one-time registration token for their
-site or approve a shoveler that registered without one (it waits as pending).
-The shoveler generates its own RSA key, registers the public key at
-`/register`, then authenticates at `/token` with a JWT signed
-by its private key (`private_key_jwt`) to fetch short-lived RS256 JWTs that
-RabbitMQ validates against this service's published JWKS. No shared secret.
+never log in: the shoveler generates its own RSA key, registers the public key
+at `/register`, and waits as pending until a member of the one admin group
+(CILogon login) approves it, unless an admin gave it a one-time registration
+token. It then authenticates at `/token` with a JWT signed by its private key
+(`private_key_jwt`) to fetch short-lived RS256 JWTs that RabbitMQ validates
+against this service's published JWKS. No shared secret.
 
 Design ethos: **small and boring**. A few hundred lines across a handful of
 files, clarity over cleverness. Do not add infrastructure (Celery, Redis, an
@@ -24,11 +24,11 @@ ORM, a JS framework, the Tailwind Play CDN) — the stack is fixed (see README).
 | `config.py` | `Settings` dataclass loaded once from env via `get_settings()` (lru_cache). All env parsing lives here. |
 | `db.py` | stdlib `sqlite3` (WAL), schema init, and all SQL. No ORM. One connection per operation. |
 | `keys.py` | RSA key gen/load, JWKS, `KeyStore`, manifest-based rotation. CLI: `python -m portal.keys generate|list`. |
-| `registration.py` | `/register` logic (`register`): bearer registration token or token-less pending registration, RFC 7591 metadata validation, idempotent retry. |
+| `registration.py` | `/register` logic (`register`): token-less pending registration or an admin-made bearer registration token, RFC 7591 metadata validation, idempotent retry. |
 | `tokens.py` | `/token` logic (`issue_token`): `private_key_jwt` assertion verification + replay check, claim building, registration-token generation/hashing, in-process `RateLimiter`. |
-| `authz.py` | COmanage group-based authz: `sites_for_groups`/`may_manage_site` (group `<prefix><site>` → site) + `is_registry_admin`. No file. |
+| `authz.py` | `is_admin(admin_group, groups)`: the only authorization check. |
 | `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
-| `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()` helper, machine endpoints. |
+| `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()`/`admin_user()`/`refuse()` helpers, machine endpoints. |
 | `expire.py` | Expiry subcommand (idle clients, stale pending registrations): `python -m portal.expire`. |
 | `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `registration_token`, `not_authorized`, `admin`. |
 
@@ -83,24 +83,20 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - **Pending (token-less) registration:** only when there is NO Authorization
   header (a present-but-bad token is always 401, never pending). Pending
   clients have NULL site/owner, get `400 authorization_pending` at `/token`
-  only AFTER their assertion verifies, are kept out of site/admin client lists
-  and idle-expiry, and are capped and purged. Site managers approve into
-  their own sites, registry admins into any; the approver becomes the owner.
-- **Revoking registration tokens:** any manager of the token's site may revoke
-  a pending one (not owner-only, unlike client Disable/Re-enable).
-- **Re-enable:** owners may re-enable `idle` / `revoked-by-owner` clients, never
-  `revoked-by-admin` (may be a compromised key; recovery = new registration).
+  only AFTER their assertion verifies, are kept out of the client list and
+  idle-expiry, and are capped and purged. An admin approves one and types its
+  site label; `owner_*` records that admin (or the token's creator).
 - **Browser POSTs are CSRF-protected.** Every form includes the per-session
   `csrf_token`; handlers call `_check_csrf`. Destructive actions also confirm
   via a JS `confirm()` in the template. New POST routes must do the same.
-- **Authorization:** driven by COmanage group membership from CILogon's
-  `isMemberOf` claim (captured into the session at login). A group
-  `<COMANAGE_GROUP_PREFIX><site>` grants management of `<site>`
-  (`authz.sites_for_groups`); members of `REGISTRY_ADMIN_GROUP` see all via
-  `/admin`. The admin group is never a site, even if it has the prefix:
-  `sites_for_groups`/`may_manage_site` take a required `admin_group=` keyword
-  to exclude it; always pass `settings.registry_admin_group`. No allow-list file, no email-domain auto-grant — group membership
-  is the only grant. Group changes take effect on next login, not instantly.
+- **Authorization:** one rule. Only members of `ADMIN_GROUP` (COmanage, via
+  CILogon's `isMemberOf`, captured into the session at login) may use the
+  portal; everyone else gets the not-authorized page. Every browser route
+  calls `admin_user()` first (POSTs answer non-admins with `refuse()`).
+  Admins can do everything: approve/reject, tokens, disable/re-enable any
+  shovelers. A site is only a display label, never a grant. No per-site
+  groups, no owner-only checks, no allow-list file. Group changes take effect
+  on next login.
 - **Sessions:** cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` whenever
   `PORTAL_BASE_URL` is https.
 - **Config:** add new settings in `config.py` (parse env + default there), then
@@ -123,13 +119,14 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 ## Testing notes
 
 - `tests/conftest.py` builds an isolated `Settings` per test (tmp DB, tmp key
-  dir, `comanage_group_prefix`/`registry_admin_group`) and a `TestClient` with
+  dir, `admin_group="shoveler-admins"`) and a `TestClient` with
   `base_url="https://testserver"` so the **Secure** session cookie is sent back.
 - `tests/helpers.py` (imported as `helpers`) generates shoveler RSA keys, JWKs,
   Go-client-shaped assertions, and seeds tokens/clients (`seed_token`,
   `seed_client`, `seed_pending`). Use it rather than inserting rows by hand.
 - For routes needing a logged-in user, monkeypatch `portal.main.current_user`
-  to return a `UserInfo` with the right `groups` (e.g. `("shoveler-nebraska",)`);
+  to return a `UserInfo` with the right `groups` (`("shoveler-admins",)` for an
+  admin);
   it's resolved as a module global at call time. CSRF token is scraped from a
   prior `GET` of the page.
 - Coverage lives in `test_register`, `test_token` (incl. discovery),

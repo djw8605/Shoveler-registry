@@ -91,13 +91,21 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         ctx.setdefault("csrf_token", _csrf_token(request.session))
         ctx.setdefault("flashes", _pop_flashes(request.session))
         ctx.setdefault("portal_name", "Shoveler Auth")
-        ctx.setdefault(
-            "is_admin",
-            authz.is_registry_admin(
-                settings.registry_admin_group, user.groups if user else ()
-            ),
-        )
         return templates.TemplateResponse(request, name, ctx)
+
+    def admin_user(request: Request):
+        """The logged-in admin, or None if not logged in / not in ADMIN_GROUP."""
+        user = current_user(request.session)
+        if user and authz.is_admin(settings.admin_group, user.groups):
+            return user
+        return None
+
+    def refuse(request: Request) -> RedirectResponse:
+        """Response for a browser POST from anyone who isn't a logged-in admin."""
+        if current_user(request.session):
+            _flash(request.session, "Not authorized.", "error")
+            return RedirectResponse("/dashboard", status_code=303)
+        return RedirectResponse("/", status_code=303)
 
     # --- Browser routes --------------------------------------------------
 
@@ -140,125 +148,54 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         logout_user(request.session)
         return RedirectResponse("/", status_code=303)
 
+    # Everything below is for members of ADMIN_GROUP only. Each POST checks
+    # admin, then CSRF, then acts, and redirects back to the dashboard.
+
     @app.get("/dashboard", response_class=HTMLResponse)
     def dashboard(request: Request):
         user = current_user(request.session)
         if not user:
             return RedirectResponse("/", status_code=303)
-        sites = authz.sites_for_groups(
-            user.groups,
-            settings.comanage_group_prefix,
-            admin_group=settings.registry_admin_group,
-        )
-        if not sites:
+        if not admin_user(request):
             return render(
-                request,
-                "not_authorized.html",
-                admin_contact=settings.admin_contact,
+                request, "not_authorized.html", admin_contact=settings.admin_contact
             )
         conn = db.connect(settings.db_path)
         try:
-            rows = db.list_clients_for_sites(conn, sites)
-            token_rows = db.list_registration_tokens_for_sites(conn, sites)
             pending = [_pending_view(r) for r in db.list_pending_clients(conn)]
-        finally:
-            conn.close()
-        by_site = {site: [] for site in sites}
-        for row in rows:
-            by_site[row["site"]].append(_client_view(row, settings.idle_days))
-        tokens_by_site = {site: [] for site in sites}
-        for row in token_rows:
-            tokens_by_site[row["site"]].append(_token_view(row))
-        return render(
-            request,
-            "dashboard.html",
-            sites=sites,
-            by_site=by_site,
-            tokens_by_site=tokens_by_site,
-            pending=pending,
-        )
-
-    @app.get("/admin", response_class=HTMLResponse)
-    def admin(request: Request):
-        user = current_user(request.session)
-        if not user:
-            return RedirectResponse("/", status_code=303)
-        if not authz.is_registry_admin(settings.registry_admin_group, user.groups):
-            _flash(request.session, "Not authorized for the admin view.", "error")
-            return RedirectResponse("/dashboard", status_code=303)
-        conn = db.connect(settings.db_path)
-        try:
-            rows = db.list_all_clients(conn)
-            pending = [_pending_view(r) for r in db.list_pending_clients(conn)]
+            reg_tokens = [_token_view(r) for r in db.list_registration_tokens(conn)]
+            clients = [
+                _client_view(r, settings.idle_days) for r in db.list_all_clients(conn)
+            ]
             known_sites = db.list_known_sites(conn)
         finally:
             conn.close()
-        clients = [
-            dict(_client_view(row, settings.idle_days), owner_email=row["owner_email"])
-            for row in rows
-        ]
         return render(
             request,
-            "admin.html",
-            clients=clients,
+            "dashboard.html",
             pending=pending,
+            reg_tokens=reg_tokens,
+            clients=clients,
             known_sites=known_sites,
         )
-
-    @app.post("/admin/{client_id}/disable")
-    def admin_disable(
-        request: Request, client_id: str, csrf_token: str = Form(...)
-    ):
-        user = current_user(request.session)
-        if not user:
-            return RedirectResponse("/", status_code=303)
-        if not authz.is_registry_admin(settings.registry_admin_group, user.groups):
-            _flash(request.session, "Not authorized for the admin view.", "error")
-            return RedirectResponse("/dashboard", status_code=303)
-        if not _check_csrf(request.session, csrf_token):
-            _flash(request.session, "Invalid CSRF token.", "error")
-            return RedirectResponse("/admin", status_code=303)
-        conn = db.connect(settings.db_path)
-        try:
-            if db.get_client(conn, client_id) is None:
-                _flash(request.session, "No such client.", "error")
-                return RedirectResponse("/admin", status_code=303)
-            db.disable_client(conn, client_id, "revoked-by-admin")
-        finally:
-            conn.close()
-        _flash(request.session, f"Credential {client_id} disabled.", "info")
-        return RedirectResponse("/admin", status_code=303)
 
     @app.post("/pending/{client_id}/approve")
     def pending_approve(
         request: Request,
         client_id: str,
-        site: str = Form(...),
+        site: str = Form(""),
         csrf_token: str = Form(...),
-        return_to: str = Form("/dashboard"),
     ):
-        user = current_user(request.session)
+        user = admin_user(request)
         if not user:
-            return RedirectResponse("/", status_code=303)
-        back = _return_to(return_to)
+            return refuse(request)
         if not _check_csrf(request.session, csrf_token):
             _flash(request.session, "Invalid CSRF token.", "error")
-            return RedirectResponse(back, status_code=303)
-        site = site.strip()
-        is_admin = authz.is_registry_admin(settings.registry_admin_group, user.groups)
-        # Site managers approve into their own sites; registry admins into any.
-        allowed = bool(site) and len(site) <= SITE_MAX_LEN and (
-            is_admin
-            or authz.may_manage_site(
-                user.groups,
-                settings.comanage_group_prefix,
-                site,
-                admin_group=settings.registry_admin_group,
-            )
-        )
-        if not allowed:
-            _flash(request.session, "You may not approve into that site.", "error")
-            return RedirectResponse(back, status_code=303)
+            return RedirectResponse("/dashboard", status_code=303)
+        site = _site_label(site)
+        if not site:
+            _flash(request.session, "Enter a site name to approve into.", "error")
+            return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
         try:
             ok = db.approve_client(
@@ -266,65 +203,43 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             )
         finally:
             conn.close()
-        if not ok:
-            _flash(request.session, "That shoveler is no longer pending.", "error")
-        else:
+        if ok:
             _flash(request.session, f"Approved {client_id} for {site}.", "info")
-        return RedirectResponse(back, status_code=303)
+        else:
+            _flash(request.session, "That shoveler is no longer pending.", "error")
+        return RedirectResponse("/dashboard", status_code=303)
 
     @app.post("/pending/{client_id}/reject")
-    def pending_reject(
-        request: Request,
-        client_id: str,
-        csrf_token: str = Form(...),
-        return_to: str = Form("/dashboard"),
-    ):
-        user = current_user(request.session)
-        if not user:
-            return RedirectResponse("/", status_code=303)
-        back = _return_to(return_to)
+    def pending_reject(request: Request, client_id: str, csrf_token: str = Form(...)):
+        if not admin_user(request):
+            return refuse(request)
         if not _check_csrf(request.session, csrf_token):
             _flash(request.session, "Invalid CSRF token.", "error")
-            return RedirectResponse(back, status_code=303)
-        # Anyone who could approve it (any site manager, or an admin) may reject.
-        if not (
-            authz.is_registry_admin(settings.registry_admin_group, user.groups)
-            or authz.sites_for_groups(
-                user.groups,
-                settings.comanage_group_prefix,
-                admin_group=settings.registry_admin_group,
-            )
-        ):
-            _flash(request.session, "Not authorized.", "error")
-            return RedirectResponse(back, status_code=303)
+            return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
         try:
             ok = db.delete_pending_client(conn, client_id)
         finally:
             conn.close()
-        if not ok:
-            _flash(request.session, "That shoveler is no longer pending.", "error")
-        else:
+        if ok:
             _flash(request.session, f"Rejected {client_id}.", "info")
-        return RedirectResponse(back, status_code=303)
+        else:
+            _flash(request.session, "That shoveler is no longer pending.", "error")
+        return RedirectResponse("/dashboard", status_code=303)
 
     @app.post("/registration-tokens")
     def registration_token_create(
-        request: Request, site: str = Form(...), csrf_token: str = Form(...)
+        request: Request, site: str = Form(""), csrf_token: str = Form(...)
     ):
-        user = current_user(request.session)
+        user = admin_user(request)
         if not user:
-            return RedirectResponse("/", status_code=303)
+            return refuse(request)
         if not _check_csrf(request.session, csrf_token):
             _flash(request.session, "Invalid CSRF token.", "error")
             return RedirectResponse("/dashboard", status_code=303)
-        if not authz.may_manage_site(
-            user.groups,
-            settings.comanage_group_prefix,
-            site,
-            admin_group=settings.registry_admin_group,
-        ):
-            _flash(request.session, "You may not manage that site.", "error")
+        site = _site_label(site)
+        if not site:
+            _flash(request.session, "Enter a site name for the token.", "error")
             return RedirectResponse("/dashboard", status_code=303)
 
         token = tokens.generate_registration_token()
@@ -351,91 +266,69 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             expires_at=expires_at,
             site=site,
             token_file=BOOTSTRAP_TOKEN_FILE,
-            snippet=_shoveler_snippet(settings, site),
+            snippet=_shoveler_snippet(settings),
         )
 
     @app.post("/registration-tokens/{token_hash}/revoke")
     def registration_token_revoke(
         request: Request, token_hash: str, csrf_token: str = Form(...)
     ):
-        user = current_user(request.session)
-        if not user:
-            return RedirectResponse("/", status_code=303)
+        if not admin_user(request):
+            return refuse(request)
         if not _check_csrf(request.session, csrf_token):
             _flash(request.session, "Invalid CSRF token.", "error")
             return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
         try:
-            row = db.get_registration_token(conn, token_hash)
-            # Any manager of the token's site may revoke it (not just its
-            # creator), e.g. if it leaked or the creator has left.
-            if row is None or not authz.may_manage_site(
-                user.groups,
-                settings.comanage_group_prefix,
-                row["site"],
-                admin_group=settings.registry_admin_group,
-            ):
-                _flash(request.session, "Not authorized for that token.", "error")
-                return RedirectResponse("/dashboard", status_code=303)
-            if not db.revoke_registration_token(conn, token_hash):
-                _flash(request.session, "That token was already used or revoked.", "error")
-                return RedirectResponse("/dashboard", status_code=303)
+            ok = db.revoke_registration_token(conn, token_hash)
         finally:
             conn.close()
-        _flash(request.session, "Registration token revoked.", "info")
+        if ok:
+            _flash(request.session, "Registration token revoked.", "info")
+        else:
+            _flash(request.session, "That token was already used or revoked.", "error")
         return RedirectResponse("/dashboard", status_code=303)
 
     @app.post("/credentials/{client_id}/disable")
     def credentials_disable(
         request: Request, client_id: str, csrf_token: str = Form(...)
     ):
-        user = current_user(request.session)
-        if not user:
-            return RedirectResponse("/", status_code=303)
+        if not admin_user(request):
+            return refuse(request)
         if not _check_csrf(request.session, csrf_token):
             _flash(request.session, "Invalid CSRF token.", "error")
             return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
         try:
             row = db.get_client(conn, client_id)
-            if not _owns(row, user, settings):
-                _flash(request.session, "Not authorized for that credential.", "error")
+            if row is None or row["pending"]:
+                _flash(request.session, "No such shoveler.", "error")
                 return RedirectResponse("/dashboard", status_code=303)
-            db.disable_client(conn, client_id, "revoked-by-owner")
+            db.disable_client(conn, client_id, DISABLED_BY_ADMIN)
         finally:
             conn.close()
-        _flash(request.session, f"Credential {client_id} disabled.", "info")
+        _flash(request.session, f"Shoveler {client_id} disabled.", "info")
         return RedirectResponse("/dashboard", status_code=303)
 
     @app.post("/credentials/{client_id}/enable")
     def credentials_enable(
         request: Request, client_id: str, csrf_token: str = Form(...)
     ):
-        user = current_user(request.session)
-        if not user:
-            return RedirectResponse("/", status_code=303)
+        if not admin_user(request):
+            return refuse(request)
         if not _check_csrf(request.session, csrf_token):
             _flash(request.session, "Invalid CSRF token.", "error")
             return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
         try:
             row = db.get_client(conn, client_id)
-            if not _owns(row, user, settings):
-                _flash(request.session, "Not authorized for that credential.", "error")
-                return RedirectResponse("/dashboard", status_code=303)
-            if not _can_reenable(row):
-                # An admin revocation may mean a compromised key: recovery is a
-                # new registration token (and so a new client and key).
-                _flash(
-                    request.session,
-                    "This credential can't be re-enabled; create a new registration token.",
-                    "error",
-                )
+            if row is None or row["pending"] or not row["disabled"]:
+                _flash(request.session, "That shoveler isn't disabled.", "error")
                 return RedirectResponse("/dashboard", status_code=303)
             db.enable_client(conn, client_id)
         finally:
             conn.close()
-        _flash(request.session, f"Credential {client_id} re-enabled.", "info")
+        _flash(request.session, f"Shoveler {client_id} re-enabled.", "info")
         return RedirectResponse("/dashboard", status_code=303)
 
     # --- Machine-facing routes ------------------------------------------
@@ -547,37 +440,23 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
 # --- Module helpers ------------------------------------------------------
 
-def _owns(row, user, settings: Settings) -> bool:
-    """Owner-only: sub matches owner AND the user may manage that site."""
-    if row is None:
-        return False
-    if row["owner_sub"] != user.sub:
-        return False
-    return authz.may_manage_site(
-        user.groups,
-        settings.comanage_group_prefix,
-        row["site"],
-        admin_group=settings.registry_admin_group,
-    )
-
-
-# Disabled reasons the owner may undo. "revoked-by-admin" is deliberately
-# absent: it may mean a compromised key, so recovery is a new registration.
-REENABLE_REASONS = {"idle", "revoked-by-owner"}
+# disabled_reason written when an admin disables a shoveler ("idle" comes
+# from the expire job). Admins may re-enable either.
+DISABLED_BY_ADMIN = "disabled-by-admin"
 
 # Where the one-time page tells operators to put the registration token (the
 # shoveler's amqp.oauth.bootstrap_token_file). Its key and registration state
 # are persisted alongside, under the same directory.
 BOOTSTRAP_TOKEN_FILE = "/etc/xrootd-monitoring-shoveler/oauth/bootstrap.token"
 
-
-# Longest site name an admin may type when approving a pending shoveler.
+# Longest site label an admin may enter.
 SITE_MAX_LEN = 100
 
 
-def _return_to(value: str) -> str:
-    # Only our own pages: never an open redirect.
-    return "/admin" if value == "/admin" else "/dashboard"
+def _site_label(value: str) -> str:
+    """A site is a display label typed by an admin; it grants no access."""
+    value = (value or "").strip()
+    return value if len(value) <= SITE_MAX_LEN else ""
 
 
 def _pending_view(row) -> dict:
@@ -588,10 +467,6 @@ def _pending_view(row) -> dict:
         "registered_ip": row["registered_ip"],
         "created_at": row["created_at"],
     }
-
-
-def _can_reenable(row) -> bool:
-    return bool(row["disabled"]) and row["disabled_reason"] in REENABLE_REASONS
 
 
 def _client_view(row, idle_days: int) -> dict:
@@ -614,7 +489,7 @@ def _client_view(row, idle_days: int) -> dict:
         "last_used_at": row["last_used_at"],
         "status": status,
         "disabled_reason": row["disabled_reason"],
-        "can_reenable": _can_reenable(row),
+        "owner_email": row["owner_email"],
     }
 
 
@@ -626,9 +501,10 @@ def _token_view(row) -> dict:
     elif db.parse_ts(row["expires_at"]) <= datetime.now(timezone.utc):
         status = "expired"
     else:
-        status = "pending"
+        status = "unused"
     return {
         "token_hash": row["token_hash"],
+        "site": row["site"],
         "created_at": row["created_at"],
         "expires_at": row["expires_at"],
         "client_id": row["client_id"],
@@ -637,7 +513,9 @@ def _token_view(row) -> dict:
     }
 
 
-def _shoveler_snippet(settings: Settings, site: str) -> str:
+def _shoveler_snippet(settings: Settings) -> str:
+    # No client_name: the shoveler's default (shoveler@<hostname>) tells
+    # several shovelers at one site apart.
     base = settings.portal_base_url.rstrip("/")
     return (
         "# xrootd-monitoring-shoveler config.yaml (merge into your amqp: section)\n"
@@ -647,5 +525,4 @@ def _shoveler_snippet(settings: Settings, site: str) -> str:
         f"    token_url: {base}/token\n"
         f"    registration_url: {base}/register\n"
         f"    bootstrap_token_file: {BOOTSTRAP_TOKEN_FILE}\n"
-        f"    client_name: {site}\n"
     )
