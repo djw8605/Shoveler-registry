@@ -395,12 +395,11 @@ k8s/overlays/tiger/   the tiger cluster (namespace osgdev), following tiger-osg-
 
 Prerequisites:
 
-- A DNS name for the portal pointing at the namespace's Traefik. The tiger
-  overlay uses `shoveler-auth.osgdev.chtc.io`, which must resolve to osgdev's
-  Traefik, 128.105.82.131 (the address of `os-registry.osgdev.chtc.io`; the
-  `osg` namespace's Traefik is a different address). There is no wildcard
-  record, so each name needs its own entry. cert-manager's `letsencrypt-prod`
-  ClusterIssuer issues the certificate. HTTPS is required: the session cookie
+- A DNS name for the portal pointing at the namespace's Traefik. On tiger the
+  record is created from the Ingress host when the Ingress is deployed; the
+  tiger overlay uses `shoveler-auth.osgdev.chtc.io`, served by osgdev's
+  Traefik (128.105.82.131). cert-manager's `letsencrypt-prod` ClusterIssuer
+  issues the certificate once the name resolves. HTTPS is required: the session cookie
   is `Secure`, and RabbitMQ and the shovelers use `/register`, `/token` and
   `/.well-known/jwks.json` over https.
 - A CILogon confidential client whose redirect URI is
