@@ -108,9 +108,9 @@ def get_settings() -> Settings:
         token_issuer=_require("TOKEN_ISSUER"),
         resource_server_id=_require("RESOURCE_SERVER_ID"),
         token_ttl_seconds=int(os.environ.get("TOKEN_TTL_SECONDS", "14400")),
-        scope_claim=os.environ.get("SCOPE_CLAIM", "extra_scope"),
+        scope_claim=os.environ.get("SCOPE_CLAIM", "scope"),
         scope_value=os.environ.get(
-            "SCOPE_VALUE", "my_rabbit_server.write:*/xrd-shoveled"
+            "SCOPE_VALUE", "my_rabbit_server.write:xrd-mon/shoveled-xrd"
         ),
         idle_days=int(os.environ.get("IDLE_DAYS", "30")),
         admin_contact=os.environ.get("ADMIN_CONTACT", "your central admin"),

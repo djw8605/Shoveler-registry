@@ -76,8 +76,8 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `TOKEN_ISSUER` | _required_ | JWT `iss` (= RabbitMQ `auth_oauth2.issuer`) |
 | `RESOURCE_SERVER_ID` | _required_ | JWT `aud` (= RabbitMQ `auth_oauth2.resource_server_id`), exact |
 | `TOKEN_TTL_SECONDS` | `14400` | JWT lifetime (4h) |
-| `SCOPE_CLAIM` | `extra_scope` | Custom claim key (= RabbitMQ `additional_scopes_key`) |
-| `SCOPE_VALUE` | `my_rabbit_server.write:*/xrd-shoveled` | Permission written into the scope claim |
+| `SCOPE_CLAIM` | `scope` | Claim holding the permission (RabbitMQ reads `scope` by default; another name needs `additional_scopes_key`) |
+| `SCOPE_VALUE` | `my_rabbit_server.write:xrd-mon/shoveled-xrd` | Permission written into that claim (vhost `xrd-mon`, exchange `shoveled-xrd`) |
 | `IDLE_DAYS` | `30` | Idle-expiry threshold |
 | `ADMIN_CONTACT` | _generic_ | Shown on the not-authorized page |
 | `ADMIN_GROUP` | _required_ | COmanage group whose members may log in and manage shovelers |
@@ -258,7 +258,7 @@ aud = RESOURCE_SERVER_ID         # exact, no surrounding whitespace
 iat = now
 exp = now + TOKEN_TTL_SECONDS
 jti = random
-<SCOPE_CLAIM> = SCOPE_VALUE      # e.g. extra_scope = my_rabbit_server.write:*/xrd-shoveled
+<SCOPE_CLAIM> = SCOPE_VALUE      # by default scope = my_rabbit_server.write:xrd-mon/shoveled-xrd
 ```
 
 `/.well-known/openid-configuration` advertises `token_endpoint`,
@@ -276,14 +276,17 @@ auth_backends.1 = rabbit_auth_backend_oauth2
 
 auth_oauth2.issuer                = https://shoveler-auth.osg.example/   # = TOKEN_ISSUER
 auth_oauth2.resource_server_id    = my_rabbit_server                     # = RESOURCE_SERVER_ID
-auth_oauth2.additional_scopes_key = extra_scope                          # = SCOPE_CLAIM
 auth_oauth2.preferred_username_claims.1 = sub
+# Only if SCOPE_CLAIM isn't the standard "scope":
+# auth_oauth2.additional_scopes_key = <SCOPE_CLAIM>
 ```
 
 RabbitMQ fetches public keys from `${TOKEN_ISSUER}/.well-known/jwks.json` (advertised
 by `${TOKEN_ISSUER}/.well-known/openid-configuration`). `resource_server_id` must
-equal the token's `aud` **exactly**, and the permission lives in the
-`additional_scopes_key` claim.
+equal the token's `aud` **exactly**. With the defaults the tokens carry the
+same `aud` and `scope` as the shoveler's `createtoken` tool mints, so they
+pass `shoveler-status`'s token check, and a RabbitMQ that already accepts
+those tokens only needs the new `issuer` (and the registry's JWKS).
 
 ## Shoveler configuration
 
@@ -454,8 +457,8 @@ curl -s https://shoveler-auth.osgdev.chtc.io/.well-known/openid-configuration
 curl -s https://shoveler-auth.osgdev.chtc.io/.well-known/jwks.json
 ```
 
-and configure RabbitMQ as described above (`issuer`, `resource_server_id` and
-`additional_scopes_key` must match `config.env` exactly).
+and configure RabbitMQ as described above (`issuer` and `resource_server_id`
+must match `config.env` exactly).
 
 Notes:
 
