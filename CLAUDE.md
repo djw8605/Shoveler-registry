@@ -30,7 +30,7 @@ Charts are uPlot (vendored from npm at build time, plain JS, no CDN).
 | `tokens.py` | `/token` logic (`issue_token`): `private_key_jwt` assertion verification + replay check, claim building, registration-token generation/hashing, in-process `RateLimiter`. |
 | `health.py` | `/report` body validation (`parse_report`), the health rules and onset (`assess` → `Health` with `summary`/`advice`/`since`), and the views of reports: chart `series`, `hourly`, `current`, `totals`, `restarts`, and the tracker (`trackers` → `Block`s, bucketed in SQL by `db.report_buckets`; `runs`, `pin_onset`, `describe`). One state vocabulary: `health.LABELS`. |
 | `authz.py` | `is_admin(admin_group, groups, admin_subs=, sub=)`: the only authorization check (group member or allow-listed sub). |
-| `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
+| `auth.py` | CILogon OIDC relying-party flow via Authlib's Starlette client (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
 | `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()`/`admin_user()`/`refuse()` helpers, machine endpoints (`/token`, `/register`, `/report`). |
 | `expire.py` | Expiry subcommand (idle clients, stale pending registrations, old health reports): `python -m portal.expire`. |
 | `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `shoveler` (one shoveler's health), `registration_token`, `not_authorized`. |
@@ -158,7 +158,8 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   prior `GET` of the page.
 - Coverage lives in `test_register`, `test_token` (incl. discovery),
   `test_report` (`/report`), `test_health` (rates and health rules),
-  `test_db`, `test_jwks`, `test_authz`, `test_expire`, `test_flow` (browser
+  `test_db`, `test_jwks`, `test_authz`, `test_expire`, `test_login` (CILogon
+  login via Authlib, IdP stubbed), `test_flow` (browser
   lifecycle), `test_admin` (incl. the Health card and shoveler page). Add to
   the matching file. `helpers.seed_report` inserts reports directly.
 
