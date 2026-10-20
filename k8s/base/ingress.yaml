@@ -1,0 +1,29 @@
+# HTTPS is required: the session cookie is Secure, and RabbitMQ and the
+# shovelers reach /token, /register and /.well-known/jwks.json over https.
+# The host must match PORTAL_BASE_URL (and TOKEN_ISSUER) in the overlay's
+# config, and <PORTAL_BASE_URL>/auth/callback must be registered with CILogon.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: shoveler-auth-portal
+  labels:
+    app: shoveler-auth-portal
+  annotations:
+    kubernetes.io/ingress.class: traefik
+    traefik.ingress.kubernetes.io/router.tls: "true"
+spec:
+  rules:
+    - host: shoveler-auth.example.org # the overlay replaces this
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: shoveler-auth-portal
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - shoveler-auth.example.org # the overlay replaces this
+      secretName: shoveler-auth-portal-certs # issued by certificate.yaml

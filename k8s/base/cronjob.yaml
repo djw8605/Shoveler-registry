@@ -5,7 +5,8 @@ metadata:
   labels:
     app: shoveler-auth-portal
 spec:
-  # Run nightly. Disables credentials idle for >= IDLE_DAYS (default 30).
+  # Run nightly. Disables shovelers idle for >= IDLE_DAYS (default 30) and
+  # deletes pending registrations older than PENDING_CLIENT_TTL_SECONDS.
   schedule: "17 3 * * *"
   concurrencyPolicy: Forbid
   successfulJobsHistoryLimit: 3
@@ -35,11 +36,13 @@ spec:
             fsGroup: 10001
           containers:
             - name: expire
-              # Pin a released tag (pushing git tag v0.1.0 publishes :0.1.0) rather
-              # than :latest; keep the Deployment and CronJob on the same tag.
-              image: ghcr.io/djw8605/shoveler-auth-portal:0.1.0
+              # The overlay pins the tag (kustomize images:), the same as the
+              # Deployment's.
+              image: ghcr.io/djw8605/shoveler-auth-portal
               command: ["python", "-m", "portal.expire"]
               envFrom:
+                - configMapRef:
+                    name: shoveler-auth-portal-config
                 - secretRef:
                     name: shoveler-auth-portal
               env:

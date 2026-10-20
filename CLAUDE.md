@@ -24,12 +24,12 @@ ORM, a JS framework, the Tailwind Play CDN) — the stack is fixed (see README).
 | `config.py` | `Settings` dataclass loaded once from env via `get_settings()` (lru_cache). All env parsing lives here. |
 | `db.py` | stdlib `sqlite3` (WAL), schema init, and all SQL. No ORM. One connection per operation. |
 | `keys.py` | RSA key gen/load, JWKS, `KeyStore`, manifest-based rotation. CLI: `python -m portal.keys generate|list`. |
-| `registration.py` | `/register` logic (`register`): bearer registration token, RFC 7591 metadata validation, idempotent retry. |
+| `registration.py` | `/register` logic (`register`): bearer registration token or token-less pending registration, RFC 7591 metadata validation, idempotent retry. |
 | `tokens.py` | `/token` logic (`issue_token`): `private_key_jwt` assertion verification + replay check, claim building, registration-token generation/hashing, in-process `RateLimiter`. |
 | `authz.py` | COmanage group-based authz: `sites_for_groups`/`may_manage_site` (group `<prefix><site>` → site) + `is_registry_admin`. No file. |
 | `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
 | `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()` helper, machine endpoints. |
-| `expire.py` | Idle-expiry subcommand: `python -m portal.expire`. |
+| `expire.py` | Expiry subcommand (idle clients, stale pending registrations): `python -m portal.expire`. |
 | `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `registration_token`, `not_authorized`, `admin`. |
 
 ## Dev setup & commands
@@ -155,17 +155,25 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 
 - Rotate keys: `python -m portal.keys generate`, then reload/restart so the new
   active key loads. Retired keys stay in JWKS until old tokens expire.
-- Idle-expiry: `python -m portal.expire` (k8s CronJob in `k8s/cronjob.yaml`).
+- Expiry: `python -m portal.expire` (k8s CronJob in `k8s/base/cronjob.yaml`).
 - Build image: `docker build -t shoveler-auth-portal .` (multi-stage; final
   image has no Node/node_modules; runs non-root).
 - Publish image: CI pushes to GHCR from `main` (`:latest`) and `v*` tags
-  (semver). Release = push a `vX.Y.Z` tag, then bump the pinned tag in both
-  `k8s/deployment.yaml` and `k8s/cronjob.yaml`. Full deploy order: README
+  (semver). Release = push a `vX.Y.Z` tag, then bump `images: newTag` in the
+  overlay (`k8s/overlays/*/kustomization.yaml`). Full deploy steps: README
   "Deploying to Kubernetes".
+- k8s layout: kustomize `k8s/base` (generic) + `k8s/overlays/tiger` (tiger
+  cluster, namespace `osg`, context `dweitzel2-tiger-dex`, NOT the default
+  nautilus context). Non-secret settings live in the overlay's committed
+  `config.env` (ConfigMap); secrets only as a SealedSecret made by
+  `seal-secret.sh` from a gitignored `secret.env`. Never commit a plain Secret.
+  Validate with `kubectl kustomize k8s/overlays/tiger` (needs a
+  `sealed-secret.yaml`). No `commonLabels` in the base (see the CronJob label
+  gotcha).
 
 ## Repo hygiene
 
 - Default branch is `main`. Don't commit `data/`, `*.pem`, `manifest.json`,
-  `.env`, `node_modules/`, or the compiled CSS.
-- Keep README, `.env.example`, and `k8s/secret.example.yaml` in sync when env
-  vars change.
+  `.env`, `secret.env`, `node_modules/`, or the compiled CSS.
+- Keep README, `.env.example`, and the overlays' `config.env` /
+  `secret.env.example` in sync when env vars change.

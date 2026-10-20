@@ -14,6 +14,8 @@ portal/static/css/app.css
 
 # Secrets & local data — NEVER commit signing keys or the DB
 .env
+# Plaintext input to k8s/overlays/*/seal-secret.sh; only the sealed output is committed.
+k8s/overlays/*/secret.env
 data/
 *.db
 *.db-wal

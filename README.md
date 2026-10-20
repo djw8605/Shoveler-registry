@@ -21,7 +21,8 @@ It does four things:
    authenticated with a JWT signed by the shoveler's private key
    (`private_key_jwt`, RFC 7523) → signed access token. The **JWKS endpoint**
    (`GET /.well-known/jwks.json`) publishes the keys RabbitMQ verifies it with.
-4. **Idle-expiry job** — disables shovelers unused for `IDLE_DAYS`.
+4. **Expiry job** — disables shovelers unused for `IDLE_DAYS` and deletes
+   pending registrations nobody approved.
 
 > **Two kinds of credentials — don't conflate them.**
 > The portal is itself a *confidential OIDC client of CILogon* (`CILOGON_CLIENT_ID`/
@@ -42,19 +43,19 @@ portal/
   config.py     env-driven settings
   db.py         sqlite schema + queries (WAL)
   keys.py       key gen/load, JWKS, rotation CLI
-  registration.py  /register: registration tokens, client metadata validation
+  registration.py  /register: registration tokens, pending (token-less) registration, metadata validation
   tokens.py     /token private_key_jwt verification, claim building, rate limiting
   authz.py      COmanage group-based site authorization
   auth.py       CILogon OIDC relying-party flow + session (captures isMemberOf)
   main.py       FastAPI app, routes, middleware, CSRF
-  expire.py     idle-expiry subcommand
+  expire.py     expiry subcommand (idle clients, stale pending registrations)
   templates/    base, macros, login, dashboard, registration_token, not_authorized, admin
   static/css/   compiled app.css (build artifact)
 assets/app.css  Tailwind source (source of truth)
 tailwind.config.js, package.json
 .env.example
 Dockerfile      multi-stage (node build → python runtime), non-root
-k8s/            deployment, cronjob, ingress + secret examples
+k8s/            kustomize base + overlays (tiger)
 .github/        CI: pytest, GHCR image build
 tests/
 ```
@@ -370,7 +371,7 @@ re-enable clients they disabled themselves, but **not** ones a registry admin
 disabled (`revoked-by-admin`): that may mean a compromised key, so recovery is
 a new registration token (a new client and key). The same job deletes pending
 registrations nobody approved within `PENDING_CLIENT_TTL_SECONDS`. Deploy it
-via [`k8s/cronjob.yaml`](./k8s/cronjob.yaml) or cron.
+via [`k8s/base/cronjob.yaml`](./k8s/base/cronjob.yaml) or cron.
 
 ## Docker
 
@@ -391,57 +392,94 @@ cluster an `imagePullSecret`.
 
 ## Deploying to Kubernetes
 
+The manifests are a kustomize base plus one overlay per deployment:
+
+```
+k8s/base/             generic: Deployment, Service, PVC, CronJob, Traefik Ingress,
+                      cert-manager Certificate, NetworkPolicy (Traefik only)
+k8s/overlays/tiger/   the tiger cluster (namespace osg), following tiger-osg-config
+  kustomization.yaml  namespace, image tag, storage class (3x-replica-nvme-raddus)
+  host.yaml           the public host for the Ingress and Certificate
+  config.env          non-secret settings -> ConfigMap (committed)
+  secret.env.example  CILogon client + session secret -> secret.env (gitignored)
+  seal-secret.sh      secret.env -> sealed-secret.yaml (SealedSecret, committed)
+```
+
 Prerequisites:
 
-- A DNS name with TLS (an ingress controller, plus cert-manager or a TLS
-  Secret). HTTPS is required: the session cookie is `Secure`, and RabbitMQ and
-  the shovelers fetch `/.well-known/jwks.json` and `/token` over https.
+- A DNS name for the portal (the tiger overlay uses `shoveler-auth.osg.chtc.io`)
+  pointing at the cluster's Traefik. On tiger there is no wildcard record, so
+  request one with the same address as `os-registry.osg.chtc.io`. cert-manager's `letsencrypt-prod`
+  ClusterIssuer issues the certificate. HTTPS is required: the session cookie
+  is `Secure`, and RabbitMQ and the shovelers use `/register`, `/token` and
+  `/.well-known/jwks.json` over https.
 - A CILogon confidential client whose redirect URI is
   `<PORTAL_BASE_URL>/auth/callback` (see above).
 - COmanage groups named `<COMANAGE_GROUP_PREFIX><site>` (plus the
   `REGISTRY_ADMIN_GROUP`, if used), released to the portal's CILogon client in
   the `isMemberOf` claim (see Authorization above).
-- A StorageClass for a small ReadWriteOnce volume. Prefer block storage;
-  SQLite in WAL mode is not safe on NFS.
-- A published image tag (see Docker above); the manifests pin `:0.1.0`.
+- A published image tag (see Docker above); the overlay pins `:0.1.0`.
+- `kubeseal` and the cluster's sealed-secrets certificate (for tiger,
+  `tiger-cert.pem` in tiger-osg-config).
 
-Apply in this order:
+Configure the overlay (tiger shown):
 
 ```bash
-# 1. Secret (portal's CILogon creds, session secret, issued-token claims).
-#    Fill values from k8s/secret.example.yaml; never commit the real one.
-kubectl create secret generic shoveler-auth-portal --from-env-file=prod.env
-
-# 2. PVC, Deployment, Service
-kubectl apply -f k8s/deployment.yaml
-
-# 3. Ingress (copy and edit host / class / issuer first)
-kubectl apply -f k8s/ingress.yaml
-
-# 4. Nightly idle-expiry job
-kubectl apply -f k8s/cronjob.yaml
+cd k8s/overlays/tiger
+# 1. Host: edit host.yaml, and PORTAL_BASE_URL / TOKEN_ISSUER in config.env.
+# 2. Settings: replace the REPLACE_ME values in config.env (RESOURCE_SERVER_ID
+#    and SCOPE_VALUE must match RabbitMQ).
+# 3. Secret: fill in secret.env and seal it for the osg namespace.
+cp secret.env.example secret.env
+./seal-secret.sh /path/to/tiger-osg-config/tiger-cert.pem
+# 4. Check the result.
+kubectl kustomize .
 ```
+
+Then deploy it one of two ways:
+
+- **Through tiger-osg-config (production).** tiger's `osg` namespace is
+  synced by Flux from tiger-osg-config and must not be changed by hand. Copy
+  the overlay to `manifests/production/shoveler-auth-portal/` there, point its
+  base at this repo (`resources: [https://github.com/djw8605/Shoveler-registry//k8s/base?ref=v0.1.0, sealed-secret.yaml]`),
+  and add `shoveler-auth-portal` to `manifests/production/kustomization.yaml`.
+  If Flux refuses remote bases, copy `k8s/base` alongside instead.
+- **Directly, for testing.** Only with write access to the namespace (OSG
+  staff dex accounts are typically read-only). Use the tiger dex context (not
+  the default nautilus one), ideally with the namespace changed to `osgdev`
+  (and the secret resealed with `NAMESPACE=osgdev ./seal-secret.sh ...`):
+
+  ```bash
+  kubectl --context dweitzel2-tiger-dex apply -k k8s/overlays/tiger
+  ```
+
+For another cluster, copy `overlays/tiger` and change the namespace, host,
+storage class, Traefik/cert-manager details and sealing certificate (or
+replace `sealed-secret.yaml` with however that cluster provides Secrets).
 
 On first start the portal creates the SQLite DB and an active signing key on
 the volume; no bootstrap step is needed. Then check:
 
 ```bash
-curl -s https://shoveler-auth.osg.example/healthz
-curl -s https://shoveler-auth.osg.example/.well-known/openid-configuration
-curl -s https://shoveler-auth.osg.example/.well-known/jwks.json
+curl -s https://shoveler-auth.osg.chtc.io/healthz
+curl -s https://shoveler-auth.osg.chtc.io/.well-known/openid-configuration
+curl -s https://shoveler-auth.osg.chtc.io/.well-known/jwks.json
 ```
 
 and configure RabbitMQ as described above (`issuer`, `resource_server_id` and
-`additional_scopes_key` must match the Secret exactly).
+`additional_scopes_key` must match `config.env` exactly).
 
 Notes:
 
 - Keep `replicas: 1`. The Deployment uses `strategy: Recreate` because the
   volume is ReadWriteOnce and SQLite must have a single writer; expect a few
-  seconds of downtime per rollout.
+  seconds of downtime per rollout. Editing `config.env` rolls the Deployment
+  (the ConfigMap name carries a content hash).
 - The CronJob shares the same volume, so it has pod affinity to run on the
   portal pod's node. If the portal pod is down, the run waits up to an hour
   for it and is then skipped.
+- The NetworkPolicy admits only Traefik pods (`app: traefik`); egress stays
+  open for CILogon.
 - Rotate keys with
   `kubectl exec deploy/shoveler-auth-portal -- python -m portal.keys generate`,
   then `kubectl rollout restart deploy/shoveler-auth-portal`.

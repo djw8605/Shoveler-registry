@@ -1,0 +1,24 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Generic manifests for the Shoveler Auth Portal: a single-replica Deployment
+# with its SQLite DB and signing keys on a ReadWriteOnce volume, the nightly
+# idle-expiry CronJob, a Traefik Ingress with a cert-manager Certificate, and
+# a NetworkPolicy admitting only Traefik.
+#
+# An overlay supplies everything site-specific: namespace, host (Ingress and
+# Certificate), image tag, storage class, the shoveler-auth-portal-config
+# ConfigMap (non-secret settings) and the shoveler-auth-portal Secret
+# (CILOGON_CLIENT_ID, CILOGON_CLIENT_SECRET, SESSION_SECRET). See
+# overlays/tiger.
+#
+# No commonLabels: the CronJob pod must NOT carry app=shoveler-auth-portal,
+# which the Service, Deployment and NetworkPolicy select on.
+resources:
+  - deployment.yaml
+  - service.yaml
+  - pvc.yaml
+  - cronjob.yaml
+  - ingress.yaml
+  - certificate.yaml
+  - networkpolicy.yaml

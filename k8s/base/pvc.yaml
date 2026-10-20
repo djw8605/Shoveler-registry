@@ -1,0 +1,15 @@
+# SQLite DB + signing keys. Losing it means new signing keys (old tokens stop
+# validating) and losing every registered shoveler, so use a replicated
+# storage class (the overlay sets it). Prefer block storage: SQLite in WAL
+# mode is not safe on NFS.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shoveler-auth-portal-data
+  labels:
+    app.kubernetes.io/name: shoveler-auth-portal
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
