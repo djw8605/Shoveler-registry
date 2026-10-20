@@ -67,7 +67,8 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   256 random bits, and `/register` looks tokens up by hash; don't "upgrade" it
   to argon2). Spend + create client atomically (`db.register_client`). Never log
   a registration token, client assertion or minted token at any level.
-- **Signing keys:** private keys written `0600`, never logged, never returned,
+- **Signing keys** (and the generated `session.secret` beside them): written
+  `0600`, never logged, never returned,
   never committed (`.gitignore` covers `*.pem`, `manifest.json`, `data/`). All
   public keys (active + retired) are published in JWKS; only the newest signs.
 - **`/token`:** `private_key_jwt` only. Verify with `algorithms=["RS256"]`
@@ -162,16 +163,17 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - k8s layout: kustomize `k8s/base` (generic) + `k8s/overlays/tiger` (tiger
   cluster, namespace `osgdev`, host `shoveler-auth.osgdev.chtc.io` (osgdev's
   own Traefik), context `dweitzel2-tiger-dex`, NOT the default
-  nautilus context). Non-secret settings live in the overlay's committed
-  `config.env` (ConfigMap); secrets only as a SealedSecret made by
-  `seal-secret.sh` from a gitignored `secret.env`. Never commit a plain Secret.
-  Validate with `kubectl kustomize k8s/overlays/tiger` (needs a
-  `sealed-secret.yaml`). No `commonLabels` in the base (see the CronJob label
-  gotcha).
+  nautilus context). Settings live in the overlay's committed `config.env`
+  (ConfigMap); nothing in this repo is secret. The CILogon client comes from
+  the pre-existing Secret `shoveler-auth-oidc-secret` (keys `client.id`,
+  `client.secret`); the session secret is generated on the volume
+  (`keys.load_or_create_session_secret`). Never commit a Secret. Validate with
+  `kubectl kustomize k8s/overlays/tiger`. No `commonLabels` in the base (see
+  the CronJob label gotcha).
 
 ## Repo hygiene
 
 - Default branch is `main`. Don't commit `data/`, `*.pem`, `manifest.json`,
-  `.env`, `secret.env`, `node_modules/`, or the compiled CSS.
-- Keep README, `.env.example`, and the overlays' `config.env` /
-  `secret.env.example` in sync when env vars change.
+  `.env`, `node_modules/`, or the compiled CSS.
+- Keep README, `.env.example`, and the overlays' `config.env` in sync when env
+  vars change.

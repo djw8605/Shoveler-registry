@@ -43,9 +43,19 @@ spec:
               envFrom:
                 - configMapRef:
                     name: shoveler-auth-portal-config
-                - secretRef:
-                    name: shoveler-auth-portal
               env:
+                # The portal's own CILogon client, from a Secret with keys
+                # client.id / client.secret (created by the CILogon/COmanage admin).
+                - name: CILOGON_CLIENT_ID
+                  valueFrom:
+                    secretKeyRef:
+                      name: shoveler-auth-oidc-secret
+                      key: client.id
+                - name: CILOGON_CLIENT_SECRET
+                  valueFrom:
+                    secretKeyRef:
+                      name: shoveler-auth-oidc-secret
+                      key: client.secret
                 - name: DB_PATH
                   value: /data/portal.db
                 - name: SIGNING_KEY_DIR

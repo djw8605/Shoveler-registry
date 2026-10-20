@@ -35,6 +35,8 @@ class Settings:
     portal_base_url: str
 
     # --- Sessions ---
+    # Signs session cookies. Empty: generated once and kept beside the
+    # signing keys (keys.load_or_create_session_secret).
     session_secret: str
 
     # --- Storage ---
@@ -102,7 +104,8 @@ def get_settings() -> Settings:
             "https://cilogon.org/.well-known/openid-configuration",
         ),
         portal_base_url=_require("PORTAL_BASE_URL"),
-        session_secret=_require("SESSION_SECRET"),
+        # Optional: when unset, create_app generates one on the data volume.
+        session_secret=os.environ.get("SESSION_SECRET", ""),
         db_path=os.environ.get("DB_PATH", "./data/portal.db"),
         signing_key_dir=os.environ.get("SIGNING_KEY_DIR", "./data/keys"),
         token_issuer=_require("TOKEN_ISSUER"),

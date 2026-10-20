@@ -57,3 +57,29 @@ def test_retired_key_token_still_verifies_after_rotation(settings):
         old_token, store_after.jwks(), settings.resource_server_id
     )
     assert claims["sub"] == "shoveler-old"
+
+
+def test_session_secret_generated_once_and_private(settings):
+    import os
+    import stat
+
+    first = keys.load_or_create_session_secret(settings.signing_key_dir)
+    path = os.path.join(settings.signing_key_dir, keys.SESSION_SECRET_FILE)
+    assert len(first) >= 48
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+    # Reused on later starts, so sessions survive restarts.
+    assert keys.load_or_create_session_secret(settings.signing_key_dir) == first
+
+
+def test_app_without_session_secret_uses_generated_one(settings):
+    import dataclasses
+    import os
+
+    from fastapi.testclient import TestClient
+    from portal.main import create_app
+
+    no_secret = dataclasses.replace(settings, session_secret="")
+    client = TestClient(create_app(no_secret), base_url="https://testserver")
+    assert client.get("/").status_code == 200
+    assert os.path.exists(os.path.join(settings.signing_key_dir, keys.SESSION_SECRET_FILE))
+

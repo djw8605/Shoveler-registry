@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import secrets
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -179,6 +180,34 @@ def load_keys(key_dir: str) -> KeyStore:
     if active_kid not in keys:
         raise RuntimeError(f"Active kid {active_kid} not present among loaded keys")
     return KeyStore(active_kid=active_kid, keys=keys)
+
+
+# --- Session secret ------------------------------------------------------
+
+SESSION_SECRET_FILE = "session.secret"
+
+
+def load_or_create_session_secret(key_dir: str) -> str:
+    """The cookie-signing secret kept beside the signing keys (0600).
+
+    Used when SESSION_SECRET isn't configured: generated on first start and
+    reused after, so sessions survive restarts without anyone managing it.
+    """
+    os.makedirs(key_dir, exist_ok=True)
+    path = os.path.join(key_dir, SESSION_SECRET_FILE)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        with open(path, "r", encoding="utf-8") as fh:
+            secret = fh.read().strip()
+        if not secret:
+            raise RuntimeError(f"{path} is empty; delete it to generate a new one")
+        return secret
+    secret = secrets.token_urlsafe(48)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(secret)
+    log.info("Generated session secret in %s", key_dir)
+    return secret
 
 
 # --- Rotation CLI --------------------------------------------------------

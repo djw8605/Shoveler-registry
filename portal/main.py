@@ -21,7 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import authz, db, registration, tokens
 from .auth import OIDCClient, current_user, login_user, logout_user
 from .config import Settings, get_settings
-from .keys import ensure_keys, load_keys
+from .keys import ensure_keys, load_keys, load_or_create_session_secret
 
 log = logging.getLogger("portal.main")
 
@@ -77,7 +77,8 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     https_only = settings.portal_base_url.lower().startswith("https://")
     app.add_middleware(
         SessionMiddleware,
-        secret_key=settings.session_secret,
+        secret_key=settings.session_secret
+        or load_or_create_session_secret(settings.signing_key_dir),
         same_site="lax",
         https_only=https_only,
         session_cookie="portal_session",
