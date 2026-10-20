@@ -216,3 +216,27 @@ def test_idp_error_is_rejected(client, idp):
     assert resp.status_code == 303
     assert resp.headers["location"] == "/"
     assert not logged_in(client)
+
+
+def test_logout_ends_the_session(client, idp):
+    params = start_login(client, idp)
+    finish_login(client, params["state"])
+    assert logged_in(client)
+
+    resp = client.get("/auth/logout", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/"
+    dash = client.get("/dashboard", follow_redirects=False)
+    assert dash.status_code == 303
+    assert dash.headers["location"] == "/"
+    assert client.get("/", follow_redirects=False).status_code == 200  # login page
+
+
+def test_login_again_after_logout(client, idp):
+    first = start_login(client, idp)
+    finish_login(client, first["state"])
+    client.get("/auth/logout")
+    second = start_login(client, idp)
+    assert second["state"] != first["state"]
+    assert finish_login(client, second["state"]).headers["location"] == "/dashboard"
+    assert logged_in(client)

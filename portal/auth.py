@@ -138,5 +138,4 @@ def login_user(session, user: UserInfo) -> None:
 
 
 def logout_user(session) -> None:
-    for key in ("sub", "email", "name", "groups"):
-        session.pop(key, None)
+    session.clear()
