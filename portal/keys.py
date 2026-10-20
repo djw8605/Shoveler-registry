@@ -182,6 +182,31 @@ def load_keys(key_dir: str) -> KeyStore:
     return KeyStore(active_kid=active_kid, keys=keys)
 
 
+def load_external_key(path: str, kid: Optional[str] = None) -> KeyStore:
+    """A KeyStore holding only an operator-supplied RSA private key.
+
+    Used when SIGNING_KEY_FILE is set, e.g. the key RabbitMQ already trusts
+    (mounted from a sealed Secret), so the registry signs every access token
+    with it under ``kid`` (default: its RFC 7638 thumbprint) and publishes
+    only its public half in the JWKS. PKCS#1 or PKCS#8 PEM, unencrypted.
+    Nothing is generated or rotated in this mode; replace the file instead.
+    """
+    with open(path, "rb") as fh:
+        private_key = serialization.load_pem_private_key(fh.read(), password=None)
+    if not isinstance(private_key, RSAPrivateKey):
+        raise RuntimeError(f"{path} is not an RSA private key")
+    public_key = private_key.public_key()
+    kid = kid or _thumbprint(public_key)
+    key = SigningKey(
+        kid=kid,
+        created_at="external",
+        private_key=private_key,
+        public_key=public_key,
+    )
+    log.info("Using external signing key kid=%s", kid)
+    return KeyStore(active_kid=kid, keys={kid: key})
+
+
 # --- Session secret ------------------------------------------------------
 
 SESSION_SECRET_FILE = "session.secret"

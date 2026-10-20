@@ -42,6 +42,11 @@ class Settings:
     # --- Storage ---
     db_path: str
     signing_key_dir: str
+    # Optional operator-supplied signing key (PEM) and its kid. When set, it
+    # signs all access tokens and is the only key in the JWKS (e.g. the key
+    # RabbitMQ already trusts); otherwise keys are generated in signing_key_dir.
+    signing_key_file: str
+    signing_key_id: str
 
     # --- Issued-token claims (must match RabbitMQ's expectations) ---
     token_issuer: str
@@ -108,6 +113,8 @@ def get_settings() -> Settings:
         session_secret=os.environ.get("SESSION_SECRET", ""),
         db_path=os.environ.get("DB_PATH", "./data/portal.db"),
         signing_key_dir=os.environ.get("SIGNING_KEY_DIR", "./data/keys"),
+        signing_key_file=os.environ.get("SIGNING_KEY_FILE", "").strip(),
+        signing_key_id=os.environ.get("SIGNING_KEY_ID", "").strip(),
         token_issuer=_require("TOKEN_ISSUER"),
         resource_server_id=_require("RESOURCE_SERVER_ID"),
         token_ttl_seconds=int(os.environ.get("TOKEN_TTL_SECONDS", "14400")),

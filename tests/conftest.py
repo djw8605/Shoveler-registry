@@ -17,6 +17,8 @@ def settings(tmp_path) -> Settings:
         session_secret="x" * 48,
         db_path=str(tmp_path / "portal.db"),
         signing_key_dir=str(tmp_path / "keys"),
+        signing_key_file="",
+        signing_key_id="",
         token_issuer="https://portal.test/",
         resource_server_id="my_rabbit_server",
         token_ttl_seconds=14400,

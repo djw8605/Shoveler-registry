@@ -21,7 +21,12 @@ from starlette.middleware.sessions import SessionMiddleware
 from . import authz, db, registration, tokens
 from .auth import OIDCClient, current_user, login_user, logout_user
 from .config import Settings, get_settings
-from .keys import ensure_keys, load_keys, load_or_create_session_secret
+from .keys import (
+    ensure_keys,
+    load_external_key,
+    load_keys,
+    load_or_create_session_secret,
+)
 
 log = logging.getLogger("portal.main")
 
@@ -60,8 +65,13 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     # Initialise persistent state before serving.
     db.init_db(settings.db_path)
-    ensure_keys(settings.signing_key_dir)
-    keystore = load_keys(settings.signing_key_dir)
+    if settings.signing_key_file:
+        keystore = load_external_key(
+            settings.signing_key_file, settings.signing_key_id or None
+        )
+    else:
+        ensure_keys(settings.signing_key_dir)
+        keystore = load_keys(settings.signing_key_dir)
 
     app = FastAPI(title="Shoveler Auth Portal", docs_url=None, redoc_url=None)
     app.state.settings = settings

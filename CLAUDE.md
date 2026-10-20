@@ -71,6 +71,9 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   `0600`, never logged, never returned,
   never committed (`.gitignore` covers `*.pem`, `manifest.json`, `data/`). All
   public keys (active + retired) are published in JWKS; only the newest signs.
+  With `SIGNING_KEY_FILE` (an operator-supplied key, e.g. the one RabbitMQ
+  already trusts, kid `SIGNING_KEY_ID`) that key alone signs and is the only
+  one in JWKS; nothing is generated (`keys.load_external_key`).
 - **`/token`:** `private_key_jwt` only. Verify with `algorithms=["RS256"]`
   ONLY (no `none`/HS256 confusion), the stored `kid`, `iss == sub ==
   client_id`, an accepted `aud` (`Settings.token_endpoint_audiences`), required
@@ -166,7 +169,9 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   nautilus context). Settings live in the overlay's committed `config.env`
   (ConfigMap); nothing in this repo is secret. The CILogon client comes from
   the pre-existing Secret `shoveler-auth-oidc-secret` (keys `client.id`,
-  `client.secret`); the session secret is generated on the volume
+  `client.secret`), the access-token signing key from Secret
+  `shoveler-auth-signing-key` (`private.pem`, mounted by the overlay's
+  `signing-key.yaml`); the session secret is generated on the volume
   (`keys.load_or_create_session_secret`). Never commit a Secret. Validate with
   `kubectl kustomize k8s/overlays/tiger`. No `commonLabels` in the base (see
   the CronJob label gotcha).

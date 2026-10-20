@@ -1,0 +1,32 @@
+# Sign access tokens with the key RabbitMQ already trusts (the one the
+# shoveler's createtoken signs with, kid xrdshoveler) instead of a generated
+# one. It comes from Secret shoveler-auth-signing-key, key private.pem (PKCS#1
+# or PKCS#8 RSA PEM), sealed into tiger-osg-config:
+#
+#   kubectl create secret generic shoveler-auth-signing-key -n osgdev \
+#       --dry-run=client --from-file=private.pem=<key.pem> -o json \
+#     | kubeseal -o yaml --cert tiger-cert.pem \
+#     > manifests/development/shoveler-auth-signing-key.yaml
+#
+# The kid is SIGNING_KEY_ID in config.env.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shoveler-auth-portal
+spec:
+  template:
+    spec:
+      containers:
+        - name: portal
+          env:
+            - name: SIGNING_KEY_FILE
+              value: /etc/shoveler-auth/signing-key/private.pem
+          volumeMounts:
+            - name: signing-key
+              mountPath: /etc/shoveler-auth/signing-key
+              readOnly: true
+      volumes:
+        - name: signing-key
+          secret:
+            secretName: shoveler-auth-signing-key
+            defaultMode: 0440 # readable via the pod's fsGroup, not world
