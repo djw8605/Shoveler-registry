@@ -1,4 +1,5 @@
-"""CILogon OIDC relying-party login (authorization-code flow, state + PKCE).
+"""CILogon OIDC relying-party login (authorization-code flow, state + PKCE),
+built on Authlib's Starlette client.
 
 The portal authenticates humans against CILogon and trusts only the ``sub``
 claim as a stable identifier; ``email``/``name`` are best-effort. The ID token
@@ -10,16 +11,11 @@ unrelated to the shoveler client_id/secret pairs this service issues.
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import logging
-import secrets
 from dataclasses import dataclass
 from typing import Optional
-from urllib.parse import urlencode
 
-import httpx
-import jwt
+from authlib.integrations.starlette_client import OAuth
 
 from .config import Settings
 
@@ -55,133 +51,69 @@ def _normalize_groups(value) -> tuple[str, ...]:
     return tuple(groups)
 
 
-class OIDCError(Exception):
-    pass
+def build_oauth(settings: Settings) -> OAuth:
+    """Authlib registry holding the CILogon relying-party client.
 
-
-class OIDCClient:
-    """Lazily-discovered CILogon client. One instance is shared by the app."""
-
-    def __init__(self, settings: Settings):
-        self.settings = settings
-        self._metadata: Optional[dict] = None
-        self._jwks_client: Optional[jwt.PyJWKClient] = None
-
-    def metadata(self) -> dict:
-        if self._metadata is None:
-            resp = httpx.get(self.settings.cilogon_discovery_url, timeout=10)
-            resp.raise_for_status()
-            self._metadata = resp.json()
-        return self._metadata
-
-    def _jwks(self) -> jwt.PyJWKClient:
-        if self._jwks_client is None:
-            self._jwks_client = jwt.PyJWKClient(self.metadata()["jwks_uri"])
-        return self._jwks_client
-
-    # --- Step 1: build the authorization redirect ---
-    def authorization_url(self) -> tuple[str, dict]:
-        """Return (url, transient) where transient must be stored in session."""
-        state = secrets.token_urlsafe(24)
-        nonce = secrets.token_urlsafe(24)
-        verifier = secrets.token_urlsafe(64)
-        challenge = (
-            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
-            .rstrip(b"=")
-            .decode()
-        )
-        params = {
-            "response_type": "code",
-            "client_id": self.settings.cilogon_client_id,
-            "redirect_uri": self.settings.redirect_uri,
+    Authlib does discovery, ``state``/``nonce``/PKCE generation (kept in the
+    session by SessionMiddleware), the code exchange, and ID-token validation
+    (signature via CILogon's JWKS, plus iss/aud/exp/nonce).
+    """
+    oauth = OAuth()
+    oauth.register(
+        name="cilogon",
+        client_id=settings.cilogon_client_id,
+        client_secret=settings.cilogon_client_secret,
+        server_metadata_url=settings.cilogon_discovery_url,
+        client_kwargs={
             "scope": "openid email profile org.cilogon.userinfo",
-            "state": state,
-            "nonce": nonce,
-            "code_challenge": challenge,
             "code_challenge_method": "S256",
-        }
-        url = self.metadata()["authorization_endpoint"] + "?" + urlencode(params)
-        return url, {"state": state, "nonce": nonce, "code_verifier": verifier}
+            "token_endpoint_auth_method": "client_secret_post",
+        },
+    )
+    return oauth
 
-    # --- Step 2: exchange the code and validate the ID token ---
-    def exchange_code(self, code: str, verifier: str, expected_nonce: str) -> UserInfo:
-        meta = self.metadata()
-        data = {
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": self.settings.redirect_uri,
-            "client_id": self.settings.cilogon_client_id,
-            "client_secret": self.settings.cilogon_client_secret,
-            "code_verifier": verifier,
-        }
-        resp = httpx.post(meta["token_endpoint"], data=data, timeout=10)
-        if resp.status_code != 200:
-            raise OIDCError(f"token exchange failed: {resp.status_code}")
-        payload = resp.json()
-        id_token = payload.get("id_token")
-        if not id_token:
-            raise OIDCError("no id_token in token response")
 
-        signing_key = self._jwks().get_signing_key_from_jwt(id_token)
-        claims = jwt.decode(
-            id_token,
-            signing_key.key,
-            algorithms=["RS256"],
-            audience=self.settings.cilogon_client_id,
-            issuer=meta["issuer"],
-            options={"require": ["exp", "iat", "sub"]},
-        )
-        if claims.get("nonce") != expected_nonce:
-            raise OIDCError("nonce mismatch")
+async def user_from_token(client, token: dict) -> UserInfo:
+    """Build a UserInfo from a token response whose ID token Authlib validated."""
+    claims = token["userinfo"]
+    # Which scopes CILogon granted and which claims it sent, by NAME only
+    # (never values or tokens): enough to see why groups are missing.
+    log.info(
+        "login sub=%s granted_scope=%r id_token_claims=%s",
+        claims["sub"],
+        token.get("scope"),
+        sorted(claims),
+    )
 
-        # Which scopes CILogon granted and which claims it sent, by NAME only
-        # (never values or tokens): enough to see why groups are missing.
-        log.info(
-            "login sub=%s granted_scope=%r id_token_claims=%s",
-            claims["sub"],
-            payload.get("scope"),
-            sorted(claims),
-        )
+    # COmanage group memberships arrive in the ``isMemberOf`` claim (released
+    # by the ``org.cilogon.userinfo`` scope). Some CILogon deployments put it
+    # in the ID token; others only at the userinfo endpoint, so fall back to
+    # userinfo using the access token when the ID token doesn't carry it.
+    groups = _normalize_groups(claims.get("isMemberOf"))
+    source = "id_token"
+    if not groups and token.get("access_token"):
+        groups = await _fetch_groups(client, token)
+        source = "userinfo"
+    log.info("login sub=%s groups=%d (from %s)", claims["sub"], len(groups), source)
+    return UserInfo(
+        sub=claims["sub"],
+        email=claims.get("email"),
+        name=claims.get("name"),
+        groups=groups,
+    )
 
-        # COmanage group memberships arrive in the ``isMemberOf`` claim (released
-        # by the ``org.cilogon.userinfo`` scope). Some CILogon deployments put it
-        # in the ID token; others only at the userinfo endpoint, so fall back to
-        # userinfo using the access token when the ID token doesn't carry it.
-        groups = _normalize_groups(claims.get("isMemberOf"))
-        source = "id_token"
-        if not groups and payload.get("access_token"):
-            groups = self._fetch_groups(meta, payload["access_token"])
-            source = "userinfo"
-        log.info("login sub=%s groups=%d (from %s)", claims["sub"], len(groups), source)
 
-        return UserInfo(
-            sub=claims["sub"],
-            email=claims.get("email"),
-            name=claims.get("name"),
-            groups=groups,
-        )
-
-    def _fetch_groups(self, meta: dict, access_token: str) -> tuple[str, ...]:
-        endpoint = meta.get("userinfo_endpoint")
-        if not endpoint:
-            log.warning("userinfo: no userinfo_endpoint in CILogon metadata")
-            return ()
-        try:
-            resp = httpx.get(
-                endpoint,
-                headers={"Authorization": f"Bearer {access_token}"},
-                timeout=10,
-            )
-            resp.raise_for_status()
-            info = resp.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            # Group info is best-effort, but say why it's missing.
-            log.warning("userinfo: request failed: %s", exc)
-            return ()
-        log.info("userinfo: claims=%s", sorted(info) if isinstance(info, dict) else type(info).__name__)
-        if not isinstance(info, dict):
-            return ()
-        return _normalize_groups(info.get("isMemberOf"))
+async def _fetch_groups(client, token: dict) -> tuple[str, ...]:
+    try:
+        info = await client.userinfo(token=token)
+    except Exception as exc:  # noqa: BLE001 - group info is best-effort
+        # Any failure (unreachable endpoint, HTTP error, bad JSON, an Authlib
+        # error) just means the user sees no sites until it recovers; log it
+        # so an admin sent to the not-authorized page can be diagnosed.
+        log.warning("userinfo group lookup failed: %s", exc)
+        return ()
+    log.info("userinfo: claims=%s", sorted(info))
+    return _normalize_groups(info.get("isMemberOf"))
 
 
 # --- Session helpers -----------------------------------------------------
@@ -206,5 +138,5 @@ def login_user(session, user: UserInfo) -> None:
 
 
 def logout_user(session) -> None:
-    for key in ("sub", "email", "name", "groups", "oidc"):
+    for key in ("sub", "email", "name", "groups"):
         session.pop(key, None)

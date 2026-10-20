@@ -22,7 +22,13 @@ from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
 from . import authz, db, health, registration, tokens
-from .auth import OIDCClient, current_user, login_user, logout_user
+from .auth import (
+    build_oauth,
+    current_user,
+    login_user,
+    logout_user,
+    user_from_token,
+)
 from .config import Settings, get_settings
 from .keys import (
     ensure_keys,
@@ -94,7 +100,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     app = FastAPI(title="Shoveler Auth Portal", docs_url=None, redoc_url=None)
     app.state.settings = settings
     app.state.keystore = keystore
-    app.state.oidc = OIDCClient(settings)
+    app.state.oauth = build_oauth(settings)
     app.state.rate_limiter = tokens.RateLimiter(
         settings.token_rate_limit, settings.token_rate_window
     )
@@ -153,26 +159,20 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         return render(request, "login.html")
 
     @app.get("/auth/login")
-    def auth_login(request: Request):
-        url, transient = app.state.oidc.authorization_url()
-        request.session["oidc"] = transient
-        return RedirectResponse(url, status_code=303)
+    async def auth_login(request: Request):
+        # Authlib stores state, nonce and the PKCE verifier in the session.
+        return await app.state.oauth.cilogon.authorize_redirect(
+            request, settings.redirect_uri
+        )
 
     @app.get("/auth/callback")
-    def auth_callback(request: Request, code: str = "", state: str = "", error: str = ""):
-        transient = request.session.pop("oidc", None)
-        if error:
-            _flash(request.session, f"CILogon returned an error: {error}", "error")
-            return RedirectResponse("/", status_code=303)
-        if not transient or not code or not secrets.compare_digest(
-            transient.get("state", ""), state
-        ):
-            _flash(request.session, "Login state mismatch; please try again.", "error")
-            return RedirectResponse("/", status_code=303)
+    async def auth_callback(request: Request):
+        cilogon = app.state.oauth.cilogon
         try:
-            user = app.state.oidc.exchange_code(
-                code, transient["code_verifier"], transient["nonce"]
-            )
+            # Checks state, exchanges the code (with the PKCE verifier) and
+            # validates the ID token, including the nonce.
+            token = await cilogon.authorize_access_token(request)
+            user = await user_from_token(cilogon, token)
         except Exception as exc:  # noqa: BLE001 - surface a friendly message
             log.warning("OIDC callback failed: %s", exc)
             _flash(request.session, "Login failed; please try again.", "error")
