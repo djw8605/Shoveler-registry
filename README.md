@@ -36,7 +36,7 @@ It does five things:
 ## Stack
 
 Python 3.12 · FastAPI · Uvicorn · stdlib `sqlite3` (WAL) · PyJWT + `cryptography`
-for signing and client-assertion verification · Authlib (+ httpx) for the CILogon OIDC flow ·
+for signing and client-assertion verification · Authlib (+ httpx2) for the CILogon OIDC flow ·
 Jinja2 templates · Tailwind CSS (compiled via the Tailwind CLI, **not** the Play CDN) ·
 [uPlot](https://github.com/leeoniya/uPlot) for the health charts (vendored from npm at
 build time, no CDN, no JS framework).
