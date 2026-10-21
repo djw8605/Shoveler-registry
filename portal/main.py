@@ -363,6 +363,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             expires_at=expires_at,
             site=site,
             token_file=BOOTSTRAP_TOKEN_FILE,
+            shoveler_user=SHOVELER_USER,
             snippet=_shoveler_snippet(settings),
         )
 
@@ -598,9 +599,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 DISABLED_BY_ADMIN = "disabled-by-admin"
 
 # Where the one-time page tells operators to put the registration token (the
-# shoveler's amqp.oauth.bootstrap_token_file). Its key and registration state
-# are persisted alongside, under the same directory.
-BOOTSTRAP_TOKEN_FILE = "/etc/xrootd-monitoring-shoveler/oauth/bootstrap.token"
+# shoveler's amqp.oauth.bootstrap_token_file): its state directory, which its
+# packages create for the service user and where it keeps its key,
+# registration state and access token.
+SHOVELER_USER = "xrootd-monitoring-shoveler"
+BOOTSTRAP_TOKEN_FILE = "/var/lib/xrootd-monitoring-shoveler/bootstrap.token"
 
 # Longest site label an admin may enter.
 SITE_MAX_LEN = 100

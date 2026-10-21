@@ -61,7 +61,8 @@ def test_admin_token_lets_shoveler_in_without_approval(client, settings, monkeyp
     assert page.status_code == 200 and "copy it now" in page.text
     assert "registration_url: https://portal.test/register" in page.text
     assert "token_url: https://portal.test/token" in page.text
-    assert "bootstrap_token_file: /etc/xrootd-monitoring-shoveler/oauth/bootstrap.token" in page.text
+    assert "bootstrap_token_file: /var/lib/xrootd-monitoring-shoveler/bootstrap.token" in page.text
+    assert "sudo chown xrootd-monitoring-shoveler: /var/lib/xrootd-monitoring-shoveler/bootstrap.token" in page.text
     # No client_name: the shoveler's default (shoveler@<hostname>) is more useful.
     assert "client_name" not in page.text
     token = re.search(r'id="token"[^>]*>([^<]+)<', page.text).group(1)

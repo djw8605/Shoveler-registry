@@ -279,7 +279,7 @@ def test_shoveler_page_without_reports(client, settings, monkeypatch):
     _as_admin(monkeypatch)
     page = client.get("/shovelers/shoveler-new").text
     assert "Never reported." in page
-    assert '<code class="font-mono text-xs">registry.report_url</code>' in page
+    assert '<code class="font-mono text-xs">amqp.oauth.report_health</code>' in page
     assert 'data-chart=' not in page and "uPlot" not in page
 
 

@@ -302,9 +302,11 @@ jti = random
 
 ### `POST /report`
 
-A shoveler reports its health every `registry.report_interval` seconds
-(default 60), authenticated with the **access token this service issued it**
-(the one it uses for RabbitMQ):
+Once this service has issued it an access token, a shoveler reports its
+health right away and then every `amqp.oauth.report_interval` seconds (default
+60), authenticated with **that access token** (the one it uses for RabbitMQ).
+The shoveler's `docs/registry-protocol.md` ("Health report endpoint")
+describes its side:
 
 ```
 POST /report
@@ -342,7 +344,7 @@ From the latest report and the last 15 minutes:
 | Not reporting | No report for 3 report intervals (at least 3 minutes) |
 | No packets | No packets received (XRootD isn't sending to it) |
 | Healthy | Otherwise |
-| No reports | Never reported (an older shoveler, or `registry.report_url` unset) |
+| No reports | Never reported (an older shoveler, or `amqp.oauth.report_health: false`) |
 
 Traffic checks wait until a process has run for 5 minutes. Rates come from the
 difference between consecutive reports of the same process; a restart (new
@@ -385,33 +387,30 @@ amqp:
 ```
 
 On first start the shoveler generates its key, registers as pending, logs its
-`client_id`, queues data on disk and polls. Send that `client_id` to a
-registry admin, who finds it under **Awaiting approval**, checks it and
-approves it with the site label; the shoveler starts sending within a minute
-and writes access tokens to `amqp.token_location` from then on. (This needs a
-shoveler that can start without a bootstrap token and omits the
-`Authorization` header when it has none.)
+`client_id` and key fingerprint, queues data on disk and polls. Send that
+`client_id` to a registry admin, who finds it under **Awaiting approval**,
+checks the fingerprint and approves it with the site label; the shoveler
+starts sending within a minute and writes access tokens to
+`amqp.token_location` from then on.
 
 **With a registration token** (to skip the approval step): an admin creates
 one for the site on the dashboard. The one-time page shows the token, how to
 install it, and the same snippet with
-`bootstrap_token_file: /etc/xrootd-monitoring-shoveler/oauth/bootstrap.token`
-added. Write the token there with mode `0600`, readable by the user the
-shoveler runs as; the shoveler is active as soon as it registers, and the file
-can be deleted after that first start.
+`bootstrap_token_file: /var/lib/xrootd-monitoring-shoveler/bootstrap.token`
+added. Write the token there with mode `0600`, owned by the
+`xrootd-monitoring-shoveler` user the shoveler runs as; the shoveler is active
+as soon as it registers, and the file can be deleted after that first start.
 
-To have the shoveler report its health to the dashboard, add:
+Once it has a token the shoveler also reports its health to this registry
+(**Health** on the dashboard), at the `/report` endpoint beside `token_url`;
+there is nothing to configure. `amqp.oauth.report_interval` (seconds, default
+60) sets how often, and `amqp.oauth.report_health: false` stops it.
 
-```yaml
-registry:
-  report_url: https://shoveler-auth.osg.example/report
-```
-
-The shoveler persists its private key and `client_id` under
-`/etc/xrootd-monitoring-shoveler/oauth/`. **That directory must survive
-restarts and redeploys** (e.g. a persistent volume for a containerised
-shoveler). If it is lost, the shoveler registers again as a new pending
-client; an admin can disable the old one.
+The shoveler keeps its private key, `client_id` and access token in
+`/var/lib/xrootd-monitoring-shoveler/`, which its packages create for the
+service user. **That directory must survive restarts and redeploys** (e.g. a
+persistent volume for a containerised shoveler). If it is lost, the shoveler
+registers again as a new pending client; an admin can disable the old one.
 
 ## Signing keys & rotation
 

@@ -320,8 +320,8 @@ def assess(latest, rows, now: Optional[datetime] = None) -> Health:
     now = now or datetime.now(timezone.utc)
     if latest is None:
         return Health("no-reports", "Never reported.",
-                      "It may predate health reporting, or not have "
-                      "registry.report_url set.")
+                      "It may predate health reporting, or have "
+                      "amqp.oauth.report_health turned off.")
     age = now - _ts(latest)
     if age > max(STALE_AFTER_MIN, _gap(latest)):
         return Health("not-reporting", f"No report since {_since(_ts(latest), now)}.",

@@ -84,7 +84,7 @@
       <p class="font-medium">{{ shoveler.health.summary }}</p>
       <p class="mt-1">
         {%- if shoveler.token_hint %}{{ shoveler.token_hint }} {% endif -%}
-        {{ shoveler.health.advice | e | replace("registry.report_url", '<code class="font-mono text-xs">registry.report_url</code>' | safe) }}
+        {{ shoveler.health.advice | e | replace("amqp.oauth.report_health", '<code class="font-mono text-xs">amqp.oauth.report_health</code>' | safe) }}
       </p>
     </div>
   {% endif %}
