@@ -49,6 +49,24 @@ CREATE TABLE IF NOT EXISTS registration_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_registration_tokens_site ON registration_tokens(site);
 
+-- Health reports shovelers POST to /report (see health.py): counters since
+-- the shoveler process started at started_at, plus its queue size. Kept for
+-- METRICS_RETENTION_HOURS, except each client's latest report.
+CREATE TABLE IF NOT EXISTS client_reports (
+    client_id           TEXT NOT NULL REFERENCES clients(client_id) ON DELETE CASCADE,
+    received_at         TEXT NOT NULL,
+    started_at          TEXT NOT NULL,
+    interval_seconds    INTEGER NOT NULL,
+    version             TEXT,
+    packets_received    INTEGER,
+    validations_failed  INTEGER,
+    messages_published  INTEGER,
+    rabbitmq_reconnects INTEGER,
+    queue_size          INTEGER,
+    PRIMARY KEY (client_id, received_at)
+);
+CREATE INDEX IF NOT EXISTS idx_client_reports_received ON client_reports(received_at);
+
 CREATE TABLE IF NOT EXISTS used_assertions (
     client_id TEXT NOT NULL,
     jti       TEXT NOT NULL,
@@ -56,6 +74,16 @@ CREATE TABLE IF NOT EXISTS used_assertions (
     PRIMARY KEY (client_id, jti)
 );
 """
+
+
+# The metric columns of client_reports; a report may omit any of them (NULL).
+REPORT_METRICS = (
+    "packets_received",
+    "validations_failed",
+    "messages_published",
+    "rabbitmq_reconnects",
+    "queue_size",
+)
 
 
 def to_iso(dt: datetime) -> str:
@@ -351,3 +379,120 @@ def record_assertion(
     except sqlite3.IntegrityError:
         return False
     return True
+
+
+# --- Health reports ------------------------------------------------------
+
+def insert_report(
+    conn: sqlite3.Connection,
+    *,
+    client_id: str,
+    received_at: str,
+    started_at: str,
+    interval_seconds: int,
+    version: Optional[str],
+    metrics: dict[str, int],
+    purge_before: str,
+) -> None:
+    """Store a report and drop this client's reports from before ``purge_before``.
+
+    ``metrics`` maps names in REPORT_METRICS to values; missing ones are NULL.
+    """
+    cols = ", ".join(REPORT_METRICS)
+    marks = ", ".join("?" for _ in REPORT_METRICS)
+    conn.execute(
+        f"""INSERT OR REPLACE INTO client_reports
+            (client_id, received_at, started_at, interval_seconds, version, {cols})
+            VALUES (?, ?, ?, ?, ?, {marks})""",
+        (client_id, received_at, started_at, interval_seconds, version,
+         *(metrics.get(name) for name in REPORT_METRICS)),
+    )
+    conn.execute(
+        "DELETE FROM client_reports WHERE client_id = ? AND received_at < ?",
+        (client_id, purge_before),
+    )
+
+
+def list_reports(
+    conn: sqlite3.Connection, since: str, client_id: Optional[str] = None
+) -> list[sqlite3.Row]:
+    """Reports received at or after ``since``, oldest first (one client or all)."""
+    if client_id is None:
+        cur = conn.execute(
+            "SELECT * FROM client_reports WHERE received_at >= ? "
+            "ORDER BY client_id, received_at",
+            (since,),
+        )
+    else:
+        cur = conn.execute(
+            "SELECT * FROM client_reports WHERE client_id = ? AND received_at >= ? "
+            "ORDER BY received_at",
+            (client_id, since),
+        )
+    return cur.fetchall()
+
+
+def report_buckets(
+    conn: sqlite3.Connection, since: str, width_seconds: int, max_missed: int
+) -> list[sqlite3.Row]:
+    """Packets received per client and time bucket since ``since``.
+
+    Each report adds the packets counted since the previous one, and the time
+    between them, to its bucket (``bucket`` 0 starts at ``since``). Pairs
+    across a restart, a counter reset, or more than ``max_missed`` report
+    intervals are skipped, as in health.series.
+    """
+    cur = conn.execute(
+        """WITH steps AS (
+             SELECT client_id, received_at, interval_seconds,
+                    packets_received - LAG(packets_received) OVER w AS packets,
+                    (julianday(received_at) - julianday(LAG(received_at) OVER w))
+                        * 86400 AS seconds,
+                    started_at = LAG(started_at) OVER w AS same_process,
+                    LAG(interval_seconds) OVER w AS prev_interval
+             FROM client_reports
+             WHERE received_at >= :since
+             WINDOW w AS (PARTITION BY client_id ORDER BY received_at))
+           SELECT client_id,
+                  CAST((julianday(received_at) - julianday(:since)) * 86400
+                       / :width AS INTEGER) AS bucket,
+                  SUM(packets) AS packets, SUM(seconds) AS seconds
+           FROM steps
+           WHERE same_process AND packets >= 0 AND seconds > 0
+             AND seconds <= :max_missed * prev_interval
+           GROUP BY client_id, bucket""",
+        {"since": since, "width": width_seconds, "max_missed": max_missed},
+    )
+    return cur.fetchall()
+
+
+def latest_report(conn: sqlite3.Connection, client_id: str) -> Optional[sqlite3.Row]:
+    cur = conn.execute(
+        "SELECT * FROM client_reports WHERE client_id = ? "
+        "ORDER BY received_at DESC LIMIT 1",
+        (client_id,),
+    )
+    return cur.fetchone()
+
+
+def latest_reports(conn: sqlite3.Connection) -> dict[str, sqlite3.Row]:
+    """Each client's most recent report, however old, keyed by client_id."""
+    cur = conn.execute(
+        """SELECT r.* FROM client_reports r
+           JOIN (SELECT client_id, MAX(received_at) AS latest
+                 FROM client_reports GROUP BY client_id) l
+             ON r.client_id = l.client_id AND r.received_at = l.latest"""
+    )
+    return {r["client_id"]: r for r in cur.fetchall()}
+
+
+def purge_reports(conn: sqlite3.Connection, before: str) -> int:
+    """Delete reports received before ``before``, except each client's latest."""
+    cur = conn.execute(
+        """DELETE FROM client_reports
+           WHERE received_at < ?
+             AND received_at < (SELECT MAX(r.received_at) FROM client_reports r
+                                WHERE r.client_id = client_reports.client_id)""",
+        (before,),
+    )
+    return cur.rowcount

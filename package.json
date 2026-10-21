@@ -2,13 +2,16 @@
   "name": "shoveler-auth-portal-css",
   "version": "0.1.0",
   "private": true,
-  "description": "Build-time Tailwind CSS toolchain for the portal (not shipped in the runtime image).",
+  "description": "Build-time CSS and chart toolchain for the portal (not shipped in the runtime image).",
   "scripts": {
+    "build": "npm run build:css && npm run build:js",
     "build:css": "tailwindcss -i ./assets/app.css -o ./portal/static/css/app.css --minify",
+    "build:js": "mkdir -p portal/static/vendor && cp node_modules/uplot/dist/uPlot.iife.min.js portal/static/vendor/",
     "watch:css": "tailwindcss -i ./assets/app.css -o ./portal/static/css/app.css --watch"
   },
   "devDependencies": {
     "@tailwindcss/forms": "^0.5.7",
-    "tailwindcss": "^3.4.4"
+    "tailwindcss": "^3.4.4",
+    "uplot": "1.6.32"
   }
 }

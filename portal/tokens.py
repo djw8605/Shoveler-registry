@@ -167,6 +167,37 @@ def verify_assertion(settings: Settings, client, assertion: str) -> dict:
     return claims
 
 
+def verify_access_token(conn, settings: Settings, keystore: KeyStore, token: str):
+    """The client an access token THIS service minted was issued to.
+
+    Used by /report: a shoveler proves who it is with the access token it
+    already holds for RabbitMQ. Checks our signature (any published kid),
+    ``iss``, ``aud`` and ``exp``, then that the client is approved and not
+    disabled. Raises TokenError(401, invalid_token) on any failure.
+    """
+    invalid = TokenError(401, "invalid_token")
+    try:
+        key = keystore.public_key(jwt.get_unverified_header(token).get("kid"))
+        if key is None:
+            raise invalid
+        claims = jwt.decode(
+            token,
+            key,
+            algorithms=["RS256"],
+            audience=settings.resource_server_id,
+            issuer=settings.token_issuer,
+            leeway=ASSERTION_LEEWAY_SECONDS,
+            options={"require": ["exp", "iat", "iss", "sub", "aud"]},
+        )
+    except jwt.PyJWTError:
+        raise invalid from None
+    sub = claims["sub"]
+    client = db.get_client(conn, sub) if isinstance(sub, str) else None
+    if client is None or client["pending"] or client["disabled"]:
+        raise invalid
+    return client
+
+
 def issue_token(
     conn,
     settings: Settings,

@@ -153,3 +153,36 @@ def seed_pending(settings, client_id: str, *, key=None, client_name="shoveler@ho
     finally:
         conn.close()
     return key
+
+
+def report_body(*, started_at="2026-10-21T00:00:00Z", interval=60, version="v1.5.0",
+                **metrics) -> dict:
+    """A /report body shaped like the Go shoveler's."""
+    return {
+        "started_at": started_at,
+        "interval_seconds": interval,
+        "version": version,
+        "metrics": metrics or {"packets_received": 10, "validations_failed": 0,
+                               "messages_published": 10, "rabbitmq_reconnects": 0,
+                               "queue_size": 0},
+    }
+
+
+def seed_report(settings, client_id: str, received_at: datetime, *,
+                started_at: datetime, interval: int = 60, version="v1.5.0",
+                **metrics) -> None:
+    """Insert a health report directly (no retention purge)."""
+    conn = db.connect(settings.db_path)
+    try:
+        db.insert_report(
+            conn,
+            client_id=client_id,
+            received_at=db.to_iso(received_at),
+            started_at=db.to_iso(started_at),
+            interval_seconds=interval,
+            version=version,
+            metrics=metrics,
+            purge_before="",
+        )
+    finally:
+        conn.close()

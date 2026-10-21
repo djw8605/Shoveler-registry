@@ -35,6 +35,9 @@ def settings(tmp_path) -> Settings:
         allow_pending_registration=True,
         max_pending_clients=100,
         pending_client_ttl_seconds=604800,
+        metrics_retention_hours=24,
+        report_rate_limit=1000,
+        report_rate_window=60,
         # Members of this COmanage group are the only users of the portal.
         admin_group="shoveler-admins",
     )

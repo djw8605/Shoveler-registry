@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-# --- Stage 1: build the Tailwind CSS (Node only at build time) ---
-FROM node:20-slim AS css
+# --- Stage 1: build the Tailwind CSS and vendor uPlot (Node only at build time) ---
+FROM node:20-slim AS assets
 WORKDIR /build
 COPY package.json package-lock.json* ./
 RUN npm ci || npm install
@@ -9,7 +9,7 @@ RUN npm ci || npm install
 COPY tailwind.config.js ./
 COPY assets/ ./assets/
 COPY portal/templates/ ./portal/templates/
-RUN npm run build:css
+RUN npm run build
 
 # --- Stage 2: Python runtime (no Node, no node_modules) ---
 FROM python:3.12-slim AS runtime
@@ -30,8 +30,9 @@ RUN python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml
 # Application code.
 COPY portal/ ./portal/
 
-# Compiled stylesheet from stage 1 (build artifact).
-COPY --from=css /build/portal/static/css/app.css ./portal/static/css/app.css
+# Compiled stylesheet and vendored uPlot from stage 1 (build artifacts).
+COPY --from=assets /build/portal/static/css/app.css ./portal/static/css/app.css
+COPY --from=assets /build/portal/static/vendor/ ./portal/static/vendor/
 
 # Writable data dir for the SQLite DB and signing keys.
 RUN mkdir -p /data && \

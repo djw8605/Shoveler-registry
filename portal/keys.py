@@ -85,6 +85,11 @@ class KeyStore:
     def active(self) -> SigningKey:
         return self._keys[self._active_kid]
 
+    def public_key(self, kid) -> Optional[RSAPublicKey]:
+        """The public key published under ``kid`` (active or retired), if any."""
+        key = self._keys.get(kid) if isinstance(kid, str) else None
+        return key.public_key if key else None
+
     def jwks(self) -> dict:
         # Active key first, then the rest (order is cosmetic).
         ordered = [self._keys[self._active_kid]] + [

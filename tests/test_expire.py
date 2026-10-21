@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from helpers import seed_client, seed_pending
+from helpers import seed_client, seed_pending, seed_report
 from portal import db, expire
 
 
@@ -124,3 +124,27 @@ def test_pending_clients_are_not_idle_disabled_but_purged(settings):
     finally:
         conn.close()
 
+
+def test_expire_purges_old_reports_but_keeps_the_latest(settings):
+    seed_client(settings, "shoveler-busy")
+    seed_client(settings, "shoveler-silent")
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(days=5)
+    for hours in (50, 30, 1):
+        seed_report(settings, "shoveler-busy", now - timedelta(hours=hours), started_at=start,
+                    packets_received=hours)
+    for hours in (60, 40):
+        seed_report(settings, "shoveler-silent", now - timedelta(hours=hours),
+                    started_at=start, packets_received=hours)
+    conn = db.connect(settings.db_path)
+    try:
+        assert expire.purge_old_reports(conn, 24, now) == 3
+        latest = db.latest_reports(conn)
+        left = {cid: [r["packets_received"] for r in db.list_reports(conn, "", cid)]
+                for cid in ("shoveler-busy", "shoveler-silent")}
+    finally:
+        conn.close()
+    assert left["shoveler-busy"] == [1]
+    # A shoveler that went quiet keeps its last report ("last seen 40 h ago").
+    assert left["shoveler-silent"] == [40]
+    assert latest["shoveler-silent"]["packets_received"] == 40

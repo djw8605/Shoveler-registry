@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime, timedelta, timezone
 
 import portal.main as main_mod
-from helpers import kid_for, seed_client, seed_pending, seed_token, shared_key
+from helpers import (
+    kid_for,
+    seed_client,
+    seed_pending,
+    seed_report,
+    seed_token,
+    shared_key,
+)
 from portal import db, tokens
 from portal.auth import UserInfo
 
@@ -170,3 +178,87 @@ def test_posts_require_csrf(client, settings, monkeypatch):
         assert "Invalid CSRF token." in resp.text, path
     assert _client(settings, "shoveler-pend1")["pending"] == 1
     assert _client(settings, "shoveler-neb1")["disabled"] == 0
+
+
+def _traffic(settings, client_id, *, minutes=30, per_min=600, published=True, queue=0):
+    """A report a minute for the last ``minutes`` from one running process."""
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(hours=2)
+    for m in range(minutes, -1, -1):
+        n = (120 - m) * per_min
+        seed_report(settings, client_id, now - timedelta(minutes=m), started_at=start,
+                    packets_received=n, messages_published=n if published else 0,
+                    validations_failed=0, rabbitmq_reconnects=0, queue_size=queue)
+
+
+def _health_rows(page):
+    """(status label, site) per Health-card row, in display order."""
+    card = page.split(">Health<", 1)[1].split("Registered shovelers", 1)[0]
+    return re.findall(r'</span>([A-Z][a-z ]+)\s*</span>.*?class="font-medium[^>]*>([^<]+)</a>',
+                      card, re.S)
+
+
+def test_dashboard_health_card(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-ok", site="nebraska")
+    seed_client(settings, "shoveler-stuck", site="wisconsin")
+    seed_client(settings, "shoveler-quiet", site="caltech")
+    seed_client(settings, "shoveler-new", site="fnal")
+    seed_client(settings, "shoveler-off", site="purdue")
+    _traffic(settings, "shoveler-ok", per_min=120)
+    _traffic(settings, "shoveler-stuck", published=False, queue=4321)
+    _traffic(settings, "shoveler-quiet", per_min=0)
+    _traffic(settings, "shoveler-off")
+    conn = db.connect(settings.db_path)
+    try:
+        db.disable_client(conn, "shoveler-off", "disabled-by-admin")
+    finally:
+        conn.close()
+    _as_admin(monkeypatch)
+    page = client.get("/dashboard").text
+    # Worst first; a disabled shoveler isn't expected to report, so it's left out.
+    assert _health_rows(page) == [
+        ("Not publishing", "wisconsin"),
+        ("No packets", "caltech"),
+        ("Healthy", "nebraska"),
+        ("No reports", "fnal"),
+    ]
+    assert "4,321" in page                      # the stuck one's queue
+    assert ">2.0<" in page                      # 120 packets/min
+    assert page.count("data-spark=") == 4
+    assert '<script src="/static/vendor/uPlot.iife.min.js" defer></script>' in page
+    assert 'href="/shovelers/shoveler-ok"' in page
+
+
+def test_no_health_card_without_shovelers(client, settings, monkeypatch):
+    _as_admin(monkeypatch)
+    assert ">Health<" not in client.get("/dashboard").text
+
+
+def test_shoveler_page(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-stuck", site="wisconsin", owner_email="w@wisc.edu",
+                client_name="shoveler@xrd.wisc.edu")
+    _traffic(settings, "shoveler-stuck", published=False, queue=4321)
+    _as_admin(monkeypatch)
+    page = client.get("/shovelers/shoveler-stuck").text
+    assert "<h1" in page and "shoveler@xrd.wisc.edu" in page
+    assert "Not publishing" in page and "published none to the message bus" in page
+    assert "4,321" in page and "w@wisc.edu" in page and "v1.5.0" in page
+    # 96 tracker blocks for 24 h, and the chart data.
+    assert page.count('title="') >= 96 and 'id="series"' in page
+    assert 'data-chart="throughput"' in page
+
+
+def test_shoveler_page_without_reports(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-new", site="fnal")
+    _as_admin(monkeypatch)
+    page = client.get("/shovelers/shoveler-new").text
+    assert "This shoveler has never reported" in page
+    assert 'data-chart=' not in page and "uPlot" not in page
+
+
+def test_shoveler_page_unknown_or_pending(client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    _as_admin(monkeypatch)
+    for cid in ("shoveler-nope", "shoveler-pend1"):
+        resp = client.get(f"/shovelers/{cid}")
+        assert resp.url.path == "/dashboard" and "No such shoveler." in resp.text

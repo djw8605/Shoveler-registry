@@ -8,7 +8,7 @@ public keys. Shovelers hold their own RSA key; **no shared secret exists
 anywhere**. It replaces a Keycloak deployment with a few hundred lines of
 Python.
 
-It does four things:
+It does five things:
 
 1. **Admin portal** (browser, CILogon login, members of one COmanage admin
    group only) — admins **approve** or reject shovelers that registered
@@ -21,8 +21,11 @@ It does four things:
    authenticated with a JWT signed by the shoveler's private key
    (`private_key_jwt`, RFC 7523) → signed access token. The **JWKS endpoint**
    (`GET /.well-known/jwks.json`) publishes the keys RabbitMQ verifies it with.
-4. **Expiry job** — disables shovelers unused for `IDLE_DAYS` and deletes
-   pending registrations nobody approved.
+4. **Health reports** (`POST /report`) — each shoveler periodically sends its
+   packet counts and queue size with its access token; the dashboard shows
+   which shovelers are healthy, with a day of charts per shoveler.
+5. **Expiry job** — disables shovelers unused for `IDLE_DAYS`, deletes
+   pending registrations nobody approved, and drops old health reports.
 
 > **Two kinds of credentials — don't conflate them.**
 > The portal is itself a *confidential OIDC client of CILogon* (`CILOGON_CLIENT_ID`/
@@ -34,7 +37,9 @@ It does four things:
 
 Python 3.12 · FastAPI · Uvicorn · stdlib `sqlite3` (WAL) · PyJWT + `cryptography`
 for signing and client-assertion verification · httpx for the CILogon OIDC flow ·
-Jinja2 templates · Tailwind CSS (compiled via the Tailwind CLI, **not** the Play CDN).
+Jinja2 templates · Tailwind CSS (compiled via the Tailwind CLI, **not** the Play CDN) ·
+[uPlot](https://github.com/leeoniya/uPlot) for the health charts (vendored from npm at
+build time, no CDN, no JS framework).
 
 ## Layout
 
@@ -45,12 +50,15 @@ portal/
   keys.py       key gen/load, JWKS, rotation CLI
   registration.py  /register: registration tokens, pending (token-less) registration, metadata validation
   tokens.py     /token private_key_jwt verification, claim building, rate limiting
+  health.py     /report validation; rates, sparklines and health status for the dashboard
   authz.py      the one COmanage admin group
   auth.py       CILogon OIDC relying-party flow + session (captures isMemberOf)
   main.py       FastAPI app, routes, middleware, CSRF
-  expire.py     expiry subcommand (idle clients, stale pending registrations)
-  templates/    base, macros, login, dashboard, registration_token, not_authorized, admin
+  expire.py     expiry subcommand (idle clients, stale pending registrations, old reports)
+  templates/    base, macros, login, dashboard, shoveler, registration_token, not_authorized
+  static/js/    charts.js: draws the health charts with uPlot
   static/css/   compiled app.css (build artifact)
+  static/vendor/  uPlot, copied from node_modules (build artifact)
 assets/app.css  Tailwind source (source of truth)
 tailwind.config.js, package.json
 .env.example
@@ -90,6 +98,8 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `ALLOW_PENDING_REGISTRATION` | `true` | Accept token-less registrations as pending (`false`: a token is required) |
 | `MAX_PENDING_CLIENTS` | `100` | Most pending registrations at once; more get `503` |
 | `PENDING_CLIENT_TTL_SECONDS` | `604800` | Unapproved pending registrations are deleted after this (7 days) |
+| `METRICS_RETENTION_HOURS` | `24` | Health reports kept (and charted) this long; each shoveler's latest is kept longer |
+| `REPORT_RATE_LIMIT` / `REPORT_RATE_WINDOW` | `10` / `60` | Per-`client_id` `/report` rate limit |
 
 ## CILogon client registration
 
@@ -126,8 +136,17 @@ Admins see one dashboard with:
 - **Registered shovelers:** every approved shoveler (site, `client_id`, name,
   key thumbprint, who approved it, status, created, last used), with
   **Disable** (`disabled_reason='disabled-by-admin'`) and **Re-enable**.
+- **Health:** every enabled shoveler's health from its reports, worst first,
+  with its packet rate now, a sparkline of the last day, its queue and when it
+  last reported. Each links to the shoveler's page (below).
 - **Registration tokens:** create a one-time token for a site, for a shoveler
   that should be active without a separate approval; revoke unused ones.
+
+Each approved shoveler also has a page, `/shovelers/<client_id>`, with its
+health and why, headline numbers, a 24-hour strip of 15-minute blocks
+(sending, no packets or none published, no reports), charts of packets per
+second (received and published), queue size and errors per minute, and its
+registration details.
 
 A site is only a label for grouping and display; it grants nobody access.
 Group memberships are captured into the session **at login**, so COmanage
@@ -140,10 +159,10 @@ changes take effect on the user's next login.
 python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 
-# 2. Build the CSS once, or watch it while you edit templates
+# 2. Build the CSS and vendor uPlot once, or watch the CSS while you edit templates
 npm install
-npm run build:css          # one-shot, minified
-npm run watch:css          # rebuild on change (run alongside uvicorn)
+npm run build              # one-shot: minified CSS + uPlot into portal/static/vendor/
+npm run watch:css          # rebuild the CSS on change (run alongside uvicorn)
 
 # 3. Config
 cp .env.example .env       # fill in CILOGON_*, ADMIN_GROUP, etc.
@@ -268,6 +287,57 @@ jti = random
 ["private_key_jwt"]` and `token_endpoint_auth_signing_alg_values_supported:
 ["RS256"]`.
 
+## Health reports
+
+### `POST /report`
+
+A shoveler reports its health every `registry.report_interval` seconds
+(default 60), authenticated with the **access token this service issued it**
+(the one it uses for RabbitMQ):
+
+```
+POST /report
+Authorization: Bearer <access token>
+Content-Type: application/json
+
+{"started_at": "2026-10-21T02:00:00Z",       # process start: same value = same process
+ "interval_seconds": 60,
+ "version": "1.5.0",
+ "metrics": {"packets_received": 120345,      # counters since started_at
+             "validations_failed": 12,
+             "messages_published": 120333,
+             "rabbitmq_reconnects": 0,
+             "queue_size": 0}}                 # current
+```
+
+→ `204`. The token must carry this service's signature (any key in the JWKS,
+so retired keys still work), `iss = TOKEN_ISSUER`, `aud = RESOURCE_SERVER_ID`
+and an unexpired `exp`, and name an approved, enabled client; anything else is
+`401 {"error":"invalid_token"}`. A malformed body is `400 invalid_request` with
+a description; unknown metric names are ignored, so a newer shoveler can send
+more. Limited per client (`REPORT_RATE_LIMIT` per `REPORT_RATE_WINDOW`).
+
+Reports are kept for `METRICS_RETENTION_HOURS` (24 h): each new report trims
+that shoveler's older ones, and the expiry job trims the rest, always keeping
+each shoveler's latest so the dashboard can say when it was last heard from.
+
+### Health status
+
+From the latest report and the last 15 minutes:
+
+| Status | When |
+| --- | --- |
+| Not publishing | Packets received but none published to the bus (e.g. RabbitMQ unreachable, token rejected) |
+| Not reporting | No report for 3 report intervals (at least 3 minutes) |
+| No packets | No packets received (XRootD isn't sending to it) |
+| Healthy | Otherwise |
+| No reports | Never reported (an older shoveler, or `registry.report_url` unset) |
+
+Traffic checks wait until a process has run for 5 minutes. Rates come from the
+difference between consecutive reports of the same process; a restart (new
+`started_at`) or missed reports break the charts' lines instead of averaging
+over the gap.
+
 ## RabbitMQ configuration
 
 Point RabbitMQ at this issuer so it can discover the JWKS and validate tokens:
@@ -318,6 +388,13 @@ install it, and the same snippet with
 added. Write the token there with mode `0600`, readable by the user the
 shoveler runs as; the shoveler is active as soon as it registers, and the file
 can be deleted after that first start.
+
+To have the shoveler report its health to the dashboard, add:
+
+```yaml
+registry:
+  report_url: https://shoveler-auth.osg.example/report
+```
 
 The shoveler persists its private key and `client_id` under
 `/etc/xrootd-monitoring-shoveler/oauth/`. **That directory must survive
@@ -370,8 +447,9 @@ are never deleted (audit + recovery). To recover, an admin clicks
 `client_id` and picks it up on its next 60-second retry, so nothing changes on
 its side. (If a key may be compromised, disable that shoveler and have it
 register again with a new key instead.) The same job deletes pending
-registrations nobody approved within `PENDING_CLIENT_TTL_SECONDS`. Deploy it
-via [`k8s/base/cronjob.yaml`](./k8s/base/cronjob.yaml) or cron.
+registrations nobody approved within `PENDING_CLIENT_TTL_SECONDS`, and health
+reports older than `METRICS_RETENTION_HOURS` (keeping each shoveler's latest).
+Deploy it via [`k8s/base/cronjob.yaml`](./k8s/base/cronjob.yaml) or cron.
 
 ## Docker
 
@@ -379,7 +457,8 @@ via [`k8s/base/cronjob.yaml`](./k8s/base/cronjob.yaml) or cron.
 docker build -t shoveler-auth-portal .
 ```
 
-Stage 1 (`node:20-slim`) compiles and purges the CSS; stage 2
+Stage 1 (`node:20-slim`) compiles and purges the CSS and copies uPlot out of
+`node_modules`; stage 2
 (`python:3.12-slim`) runs the app as a non-root user with no Node or
 `node_modules` in the final image.
 
@@ -529,5 +608,11 @@ Notes:
   It is capped (`MAX_PENDING_CLIENTS`), expires, and can be turned off
   (`ALLOW_PENDING_REGISTRATION=false`). `/token` reveals pending status only to
   the holder of the registered private key.
-- Rate limits: per-`client_id` on `/token`, per-IP on `/register`. No
-  registration token, client assertion or access token is ever logged.
+- `/report` accepts only access tokens this service signed (RS256, any
+  published `kid`), for an approved, enabled client, with `iss`/`aud`/`exp`
+  checked, and a uniform `invalid_token` for every failure. A token sent to
+  RabbitMQ could be replayed to `/report` until it expires; that can only add
+  health reports for that one shoveler, never grant access.
+- Rate limits: per-`client_id` on `/token` and `/report`, per-IP on
+  `/register`. No registration token, client assertion or access token is
+  ever logged.

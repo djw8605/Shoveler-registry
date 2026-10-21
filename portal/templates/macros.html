@@ -100,3 +100,55 @@
     </table>
   </div>
 {% endmacro %}
+
+{# Shoveler health (health.Health): a coloured dot and its label. #}
+{% macro health_badge(h) %}
+  {%- if h.status == "healthy" -%}
+    {%- set cls, dot = "bg-green-50 text-green-700 ring-green-600/20", "bg-green-500" -%}
+  {%- elif h.status == "no-packets" -%}
+    {%- set cls, dot = "bg-amber-50 text-amber-800 ring-amber-600/30", "bg-amber-500" -%}
+  {%- elif h.status == "no-reports" -%}
+    {%- set cls, dot = "bg-slate-50 text-slate-600 ring-slate-500/20", "bg-slate-400" -%}
+  {%- else -%}
+    {%- set cls, dot = "bg-red-50 text-red-700 ring-red-600/20", "bg-red-500" -%}
+  {%- endif -%}
+  <span class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset {{ cls }}" title="{{ h.detail }}">
+    <span class="h-1.5 w-1.5 rounded-full {{ dot }}" aria-hidden="true"></span>{{ h.label }}
+  </span>
+{% endmacro %}
+
+{# A packets/s figure: whole numbers from 10 up, one decimal below. #}
+{% macro rate(value) -%}
+  {%- if value is none -%}<span class="text-slate-400">—</span>
+  {%- elif value >= 10 -%}{{ "{:,.0f}".format(value) }}
+  {%- else -%}{{ "{:,.1f}".format(value) }}
+  {%- endif -%}
+{%- endmacro %}
+
+{% macro count(value) -%}
+  {%- if value is none -%}<span class="text-slate-400">—</span>
+  {%- else -%}{{ "{:,}".format(value) }}
+  {%- endif -%}
+{%- endmacro %}
+
+{# One headline number on the shoveler page. #}
+{% macro stat(label, hint="") %}
+  <div class="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
+    <dt class="text-xs font-medium text-slate-500">{{ label }}</dt>
+    <dd class="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-slate-900">{{ caller() }}</dd>
+    {% if hint %}<p class="mt-0.5 text-xs text-slate-500">{{ hint }}</p>{% endif %}
+  </div>
+{% endmacro %}
+
+{# The 24-hour strip: one block per 15 minutes (health.tracker). #}
+{% macro tracker(blocks) %}
+  <div class="flex h-8 gap-px" role="img" aria-label="Reporting over time, one block per 15 minutes">
+    {% for b in blocks %}
+      {%- if b.state == "ok" -%}{%- set cls = "bg-green-500" -%}
+      {%- elif b.state == "warn" -%}{%- set cls = "bg-amber-400" -%}
+      {%- elif b.state == "missing" -%}{%- set cls = "bg-red-500" -%}
+      {%- else -%}{%- set cls = "bg-slate-200" -%}{%- endif -%}
+      <div class="flex-1 rounded-[1px] first:rounded-l last:rounded-r {{ cls }}" title="{{ b.title }}"></div>
+    {% endfor %}
+  </div>
+{% endmacro %}

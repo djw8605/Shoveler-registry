@@ -11,11 +11,13 @@ at `/register`, and waits as pending until a member of the one admin group
 (CILogon login) approves it, unless an admin gave it a one-time registration
 token. It then authenticates at `/token` with a JWT signed by its private key
 (`private_key_jwt`) to fetch short-lived RS256 JWTs that RabbitMQ validates
-against this service's published JWKS. No shared secret.
+against this service's published JWKS. No shared secret. Shovelers also POST
+health reports to `/report` with that access token; the dashboard shows them.
 
 Design ethos: **small and boring**. A few hundred lines across a handful of
 files, clarity over cleverness. Do not add infrastructure (Celery, Redis, an
 ORM, a JS framework, the Tailwind Play CDN) — the stack is fixed (see README).
+Charts are uPlot (vendored from npm at build time, plain JS, no CDN).
 
 ## Module map (`portal/`)
 
@@ -26,11 +28,13 @@ ORM, a JS framework, the Tailwind Play CDN) — the stack is fixed (see README).
 | `keys.py` | RSA key gen/load, JWKS, `KeyStore`, manifest-based rotation. CLI: `python -m portal.keys generate|list`. |
 | `registration.py` | `/register` logic (`register`): token-less pending registration or an admin-made bearer registration token, RFC 7591 metadata validation, idempotent retry. |
 | `tokens.py` | `/token` logic (`issue_token`): `private_key_jwt` assertion verification + replay check, claim building, registration-token generation/hashing, in-process `RateLimiter`. |
+| `health.py` | `/report` body validation (`parse_report`), and the dashboard's view of reports: rates (`series`, `current`, `sparkline`), `tracker`, `totals`, and the health rules (`assess`). |
 | `authz.py` | `is_admin(admin_group, groups)`: the only authorization check. |
 | `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
-| `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()`/`admin_user()`/`refuse()` helpers, machine endpoints. |
-| `expire.py` | Expiry subcommand (idle clients, stale pending registrations): `python -m portal.expire`. |
-| `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `registration_token`, `not_authorized`, `admin`. |
+| `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()`/`admin_user()`/`refuse()` helpers, machine endpoints (`/token`, `/register`, `/report`). |
+| `expire.py` | Expiry subcommand (idle clients, stale pending registrations, old health reports): `python -m portal.expire`. |
+| `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `shoveler` (one shoveler's health), `registration_token`, `not_authorized`. |
+| `static/js/charts.js` | Draws the uPlot charts from data the templates embed (`data-spark`, `#series`). |
 
 ## Dev setup & commands
 
@@ -39,9 +43,9 @@ ORM, a JS framework, the Tailwind Play CDN) — the stack is fixed (see README).
 python3.12 -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
 
-# CSS (Node only at build time). Tailwind v3 — uses @tailwind directives + tailwind.config.js.
+# CSS + uPlot (Node only at build time). Tailwind v3 — uses @tailwind directives + tailwind.config.js.
 npm install
-npm run build:css          # one-shot minified; npm run watch:css to rebuild on change
+npm run build              # CSS (minified) + uPlot into portal/static/vendor/; npm run watch:css to rebuild CSS on change
 
 # Run (factory mode — create_app() reads settings from env)
 uvicorn --factory portal.main:create_app --reload --port 8080
@@ -81,6 +85,12 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   a uniform `401 {"error":"invalid_client"}` (never reveal which). Minted
   tokens' `aud` must equal `RESOURCE_SERVER_ID` exactly — no surrounding
   whitespace.
+- **`/report`:** Bearer access token minted by this service only: RS256,
+  `kid` from our KeyStore (`KeyStore.public_key`), `iss`/`aud`/`exp`, and an
+  approved, enabled client (`tokens.verify_access_token`). Every failure is the
+  same `401 invalid_token`. Bad bodies are `400 invalid_request`; unknown metric
+  names are ignored. Reports past `METRICS_RETENTION_HOURS` are trimmed, but a
+  client's latest report is always kept.
 - **`/register`:** every bad token is the same `401 invalid_token`; bad
   metadata is `400 invalid_client_metadata` and must NOT spend the token. No
   `registration_access_token` (RFC 7592 is out of scope).
@@ -114,11 +124,16 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 
 - `assets/app.css` + `tailwind.config.js` are the **source of truth**.
   `portal/static/css/app.css` is a **build artifact** — gitignored, regenerated
-  by `npm run build:css` and by the Docker build. After editing templates, the
+  by `npm run build:css` and by the Docker build. So is
+  `portal/static/vendor/uPlot.iife.min.js` (`npm run build:js`); uPlot's CSS is
+  `@import`ed into `assets/app.css`. After editing templates, the
   build re-scans `portal/templates/**/*.html` and purges unused classes.
-- Reuse `templates/macros.html` (`button`, `card`, `badge`, `flash`) instead of
+- Reuse `templates/macros.html` (`button`, `card`, `badge`, `flash`, and for
+  health `health_badge`, `stat`, `tracker`, `rate`, `count`) instead of
   copy-pasting long utility-class strings. The base template links the compiled
-  CSS and nothing else (no CDN).
+  CSS and nothing else (no CDN); pages with charts add uPlot and `charts.js` in
+  their `scripts` block. Chart data goes in the page as JSON (`tojson`), never
+  fetched from another endpoint.
 
 ## Testing notes
 
@@ -134,8 +149,10 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   it's resolved as a module global at call time. CSRF token is scraped from a
   prior `GET` of the page.
 - Coverage lives in `test_register`, `test_token` (incl. discovery),
+  `test_report` (`/report`), `test_health` (rates and health rules),
   `test_db`, `test_jwks`, `test_authz`, `test_expire`, `test_flow` (browser
-  lifecycle), `test_admin`. Add to the matching file.
+  lifecycle), `test_admin` (incl. the Health card and shoveler page). Add to
+  the matching file. `helpers.seed_report` inserts reports directly.
 
 ## Gotchas
 

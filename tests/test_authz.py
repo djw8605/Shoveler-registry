@@ -44,6 +44,16 @@ def test_non_admin_sees_not_authorized_and_no_data(client, settings, monkeypatch
     assert "shoveler-neb1" not in resp.text and "shoveler-pend1" not in resp.text
 
 
+def test_shoveler_page_is_for_admins_only(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-neb1")
+    assert client.get("/shovelers/shoveler-neb1", follow_redirects=False).headers[
+        "location"
+    ] == "/"
+    _login(monkeypatch, OTHER_GROUPS)
+    resp = client.get("/shovelers/shoveler-neb1")
+    assert "Not authorized" in resp.text and "shoveler-neb1" not in resp.text
+
+
 def test_admin_sees_dashboard(client, settings, monkeypatch):
     _login(monkeypatch, ADMIN_GROUPS)
     resp = client.get("/dashboard")

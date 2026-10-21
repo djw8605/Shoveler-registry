@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% import "macros.html" as ui %}
+{% block title %}{{ shoveler.name }} · {{ portal_name }}{% endblock %}
+{% block flash %}{{ ui.flash(flashes) }}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+  <div>
+    <a href="/dashboard" class="text-sm font-medium text-indigo-600 hover:text-indigo-500">&larr; All shovelers</a>
+    <div class="mt-3 flex flex-wrap items-center gap-3">
+      <h1 class="text-xl font-semibold tracking-tight text-slate-900">{{ shoveler.name }}</h1>
+      {{ ui.health_badge(shoveler.health) }}
+      {% if client.status == "disabled" %}{{ ui.badge("disabled") }}{% endif %}
+    </div>
+    <p class="mt-1 text-sm text-slate-500">
+      {{ client.site }} · <span class="font-mono text-xs">{{ client.client_id }}</span>
+      {% if latest and latest.version %} · {{ latest.version }}{% endif %}
+      {% if shoveler.uptime %} · up {{ shoveler.uptime }}{% endif %}
+    </p>
+  </div>
+
+  {% if shoveler.health.status != "healthy" %}
+    {%- if shoveler.health.status == "no-packets" -%}
+      {%- set cls = "border-amber-200 bg-amber-50 text-amber-900" -%}
+    {%- elif shoveler.health.status == "no-reports" -%}
+      {%- set cls = "border-slate-200 bg-white text-slate-700" -%}
+    {%- else -%}
+      {%- set cls = "border-red-200 bg-red-50 text-red-800" -%}
+    {%- endif -%}
+    <div class="rounded-md border px-4 py-3 text-sm {{ cls }}" role="status">{{ shoveler.health.detail }}</div>
+  {% endif %}
+
+  {% if latest %}
+    <dl class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+      {% call ui.stat("Packets/s") %}{{ ui.rate(shoveler.rates.received) }}{% endcall %}
+      {% call ui.stat("Published/s") %}{{ ui.rate(shoveler.rates.published) }}{% endcall %}
+      {% call ui.stat("Queue") %}{{ ui.count(shoveler.queue) }}{% endcall %}
+      {% call ui.stat("Failed validation", "last " ~ hours ~ " h") %}{{ ui.count(totals.validations_failed) }}{% endcall %}
+      {% call ui.stat("Bus reconnects", "last " ~ hours ~ " h") %}{{ ui.count(totals.rabbitmq_reconnects) }}{% endcall %}
+      {% call ui.stat("Restarts", "last " ~ hours ~ " h") %}{{ ui.count(restarts) }}{% endcall %}
+    </dl>
+
+    {% call ui.card(title="Last " ~ hours ~ " hours") %}
+      {{ ui.tracker(tracker) }}
+      <div class="mt-2 flex flex-wrap justify-between gap-2 text-xs text-slate-500">
+        <span>{{ tracker[0].start.strftime("%H:%M") }} UTC</span>
+        <ul class="flex flex-wrap gap-x-4 gap-y-1">
+          <li class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-green-500" aria-hidden="true"></span>Sending</li>
+          <li class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-amber-400" aria-hidden="true"></span>No packets or none published</li>
+          <li class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-red-500" aria-hidden="true"></span>No reports</li>
+        </ul>
+        <span>now</span>
+      </div>
+    {% endcall %}
+
+    <script type="application/json" id="series">{{ series | tojson }}</script>
+    {% call ui.card(title="Packets per second") %}
+      <div data-chart="throughput" class="h-56"></div>
+    {% endcall %}
+    <div class="grid gap-6 lg:grid-cols-2">
+      {% call ui.card(title="Queue") %}
+        <div data-chart="queue" class="h-44"></div>
+      {% endcall %}
+      {% call ui.card(title="Errors per minute") %}
+        <div data-chart="errors" class="h-44"></div>
+      {% endcall %}
+    </div>
+  {% endif %}
+
+  {% call ui.card(title="Details") %}
+    <dl class="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
+      {% for label, value in [
+           ("Client ID", client.client_id),
+           ("Name", client.client_name or "—"),
+           ("Key thumbprint", client.thumbprint ~ "…"),
+           ("Approved by", client.owner_email or "—"),
+           ("Registered", client.created_at[:16] | replace("T", " ")),
+           ("Token last used", client.last_used_at[:16] | replace("T", " ") if client.last_used_at else "—"),
+           ("Version", latest.version if latest and latest.version else "—"),
+           ("Process started", latest.started_at[:16] | replace("T", " ") if latest else "—"),
+           ("Reports every", (latest.interval_seconds ~ " s") if latest else "—"),
+           ("Last report", (shoveler.last_report ~ " ago") if shoveler.last_report else "never"),
+         ] %}
+        <div>
+          <dt class="text-xs font-medium text-slate-500">{{ label }}</dt>
+          <dd class="mt-0.5 text-slate-900">{{ value }}</dd>
+        </div>
+      {% endfor %}
+    </dl>
+  {% endcall %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+  {% if latest %}
+    <script src="/static/vendor/uPlot.iife.min.js" defer></script>
+    <script src="/static/js/charts.js" defer></script>
+  {% endif %}
+{% endblock %}

@@ -1,3 +1,6 @@
+/* uPlot's stylesheet (charts on the dashboard and shoveler pages), bundled in. */
+@import "uplot/dist/uPlot.min.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;

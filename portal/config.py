@@ -77,6 +77,14 @@ class Settings:
     # Pending clients not approved within this long are deleted (expire job).
     pending_client_ttl_seconds: int
 
+    # --- Shoveler health reports (POST /report) ---
+    # Reports are kept this long (each shoveler's latest one is kept longer, so
+    # "last report" survives); the dashboard charts this window.
+    metrics_retention_hours: int
+    # Per-client_id rate limit on /report: N requests per window seconds.
+    report_rate_limit: int
+    report_rate_window: int
+
     # --- Authorization ---
     # Members of this COmanage group (CILogon ``isMemberOf`` claim) are the
     # only people who can log in: they approve shovelers, mint registration
@@ -139,5 +147,8 @@ def get_settings() -> Settings:
         pending_client_ttl_seconds=int(
             os.environ.get("PENDING_CLIENT_TTL_SECONDS", "604800")
         ),
+        metrics_retention_hours=int(os.environ.get("METRICS_RETENTION_HOURS", "24")),
+        report_rate_limit=int(os.environ.get("REPORT_RATE_LIMIT", "10")),
+        report_rate_window=int(os.environ.get("REPORT_RATE_WINDOW", "60")),
         admin_group=_require("ADMIN_GROUP").strip(),
     )

@@ -1,6 +1,7 @@
-"""Idle-expiry job: disable credentials unused for IDLE_DAYS, and delete
+"""Idle-expiry job: disable credentials unused for IDLE_DAYS, delete
 pending (token-less) registrations nobody approved within
-PENDING_CLIENT_TTL_SECONDS.
+PENDING_CLIENT_TTL_SECONDS, and drop health reports older than
+METRICS_RETENTION_HOURS (keeping each shoveler's latest).
 
 Run from cron or a Kubernetes CronJob:
 
@@ -66,6 +67,18 @@ def purge_stale_pending(
     return deleted
 
 
+def purge_old_reports(
+    conn: sqlite3.Connection, retention_hours: int, now: datetime | None = None
+) -> int:
+    """Delete health reports past retention, except each client's latest.
+
+    /report already trims a shoveler's own old reports as new ones arrive;
+    this catches the ones that stopped reporting.
+    """
+    now = now or datetime.now(timezone.utc)
+    return db.purge_reports(conn, db.to_iso(now - timedelta(hours=retention_hours)))
+
+
 def main() -> int:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
@@ -76,12 +89,15 @@ def main() -> int:
     try:
         disabled = find_and_disable_idle(conn, settings.idle_days)
         purged = purge_stale_pending(conn, settings.pending_client_ttl_seconds)
+        reports = purge_old_reports(conn, settings.metrics_retention_hours)
     finally:
         conn.close()
     log.info(
-        "Idle-expiry complete: disabled %d client(s), deleted %d stale pending",
+        "Idle-expiry complete: disabled %d client(s), deleted %d stale pending, "
+        "%d old health report(s)",
         len(disabled),
         len(purged),
+        reports,
     )
     return 0
 

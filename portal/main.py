@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import secrets
+from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -13,12 +15,13 @@ from fastapi.responses import (
     JSONResponse,
     PlainTextResponse,
     RedirectResponse,
+    Response,
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import authz, db, registration, tokens
+from . import authz, db, health, registration, tokens
 from .auth import OIDCClient, current_user, login_user, logout_user
 from .config import Settings, get_settings
 from .keys import (
@@ -82,6 +85,9 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     )
     app.state.register_rate_limiter = tokens.RateLimiter(
         settings.register_rate_limit, settings.register_rate_window
+    )
+    app.state.report_rate_limiter = tokens.RateLimiter(
+        settings.report_rate_limit, settings.report_rate_window
     )
 
     https_only = settings.portal_base_url.lower().startswith("https://")
@@ -171,23 +177,79 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return render(
                 request, "not_authorized.html", admin_contact=settings.admin_contact
             )
+        now = datetime.now(timezone.utc)
+        hours = settings.metrics_retention_hours
         conn = db.connect(settings.db_path)
         try:
             pending = [_pending_view(r) for r in db.list_pending_clients(conn)]
             reg_tokens = [_token_view(r) for r in db.list_registration_tokens(conn)]
-            clients = [
-                _client_view(r, settings.idle_days) for r in db.list_all_clients(conn)
-            ]
+            client_rows = db.list_all_clients(conn)
             known_sites = db.list_known_sites(conn)
+            latest = db.latest_reports(conn)
+            # The last hour is plenty for health and the current rate; the
+            # sparklines are bucketed in SQL.
+            recent: dict[str, list] = {}
+            for r in db.list_reports(conn, db.to_iso(now - timedelta(hours=1))):
+                recent.setdefault(r["client_id"], []).append(r)
+            sparks = health.sparklines(conn, now, hours)
         finally:
             conn.close()
+        fleet = sorted(
+            (
+                _health_view(r, latest.get(r["client_id"]),
+                             recent.get(r["client_id"], []), now,
+                             sparks.get(r["client_id"], []))
+                for r in client_rows
+                if not r["disabled"]
+            ),
+            key=lambda h: (HEALTH_ORDER[h["health"].status], h["site"], h["name"]),
+        )
         return render(
             request,
             "dashboard.html",
             pending=pending,
             reg_tokens=reg_tokens,
-            clients=clients,
+            clients=[_client_view(r, settings.idle_days) for r in client_rows],
             known_sites=known_sites,
+            fleet=fleet,
+            fleet_counts=Counter(h["health"].status for h in fleet),
+            hours=hours,
+        )
+
+    @app.get("/shovelers/{client_id}", response_class=HTMLResponse)
+    def shoveler_detail(request: Request, client_id: str):
+        user = current_user(request.session)
+        if not user:
+            return RedirectResponse("/", status_code=303)
+        if not admin_user(request):
+            return render(
+                request, "not_authorized.html", admin_contact=settings.admin_contact
+            )
+        now = datetime.now(timezone.utc)
+        hours = settings.metrics_retention_hours
+        conn = db.connect(settings.db_path)
+        try:
+            row = db.get_client(conn, client_id)
+            if row is None or row["pending"]:
+                _flash(request.session, "No such shoveler.", "error")
+                return RedirectResponse("/dashboard", status_code=303)
+            latest = db.latest_report(conn, client_id)
+            rows = db.list_reports(
+                conn, db.to_iso(now - timedelta(hours=hours)), client_id
+            )
+        finally:
+            conn.close()
+        return render(
+            request,
+            "shoveler.html",
+            client=_client_view(row, settings.idle_days),
+            shoveler=_health_view(row, latest, rows, now),
+            latest=latest,
+            totals=health.totals(rows),
+            restarts=health.restarts(rows),
+            tracker=health.tracker(rows, now, hours),
+            series=health.series(rows),
+            hours=hours,
         )
 
     @app.post("/pending/{client_id}/approve")
@@ -416,6 +478,62 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             result, status_code=201, headers={"Cache-Control": "no-store"}
         )
 
+    @app.post("/report")
+    async def report_endpoint(request: Request):
+        """A shoveler's periodic health report, sent with its access token."""
+        no_store = {"Cache-Control": "no-store"}
+        bearer = registration.parse_bearer(request.headers.get("authorization"))
+        conn = db.connect(settings.db_path)
+        try:
+            try:
+                if not bearer:
+                    raise tokens.TokenError(401, "invalid_token")
+                client = tokens.verify_access_token(
+                    conn, settings, app.state.keystore, bearer
+                )
+            except tokens.TokenError as exc:
+                return JSONResponse(
+                    {"error": exc.error},
+                    status_code=exc.status,
+                    headers={**no_store, "WWW-Authenticate": 'Bearer error="invalid_token"'},
+                )
+            client_id = client["client_id"]
+            if not app.state.report_rate_limiter.check(client_id):
+                return JSONResponse(
+                    {"error": "invalid_request", "error_description": "rate limit exceeded"},
+                    status_code=429,
+                    headers={**no_store, "Retry-After": str(settings.report_rate_window)},
+                )
+            body = await _read_capped(request, MAX_REPORT_BYTES)
+            try:
+                if body is None:
+                    raise health.ReportError("report too large")
+                report = health.parse_report(json.loads(body))
+            except ValueError:
+                return JSONResponse(
+                    health.ReportError("request body must be JSON").as_dict(),
+                    status_code=400,
+                    headers=no_store,
+                )
+            except health.ReportError as exc:
+                return JSONResponse(exc.as_dict(), status_code=400, headers=no_store)
+            now = datetime.now(timezone.utc)
+            db.insert_report(
+                conn,
+                client_id=client_id,
+                received_at=db.to_iso(now),
+                started_at=report.started_at,
+                interval_seconds=report.interval_seconds,
+                version=report.version,
+                metrics=report.metrics,
+                purge_before=db.to_iso(
+                    now - timedelta(hours=settings.metrics_retention_hours)
+                ),
+            )
+        finally:
+            conn.close()
+        return Response(status_code=204, headers=no_store)
+
     @app.get("/.well-known/jwks.json")
     def jwks(request: Request):
         return JSONResponse(app.state.keystore.jwks())
@@ -463,6 +581,19 @@ BOOTSTRAP_TOKEN_FILE = "/etc/xrootd-monitoring-shoveler/oauth/bootstrap.token"
 # Longest site label an admin may enter.
 SITE_MAX_LEN = 100
 
+# A health report is a few hundred bytes; refuse anything far larger.
+MAX_REPORT_BYTES = 16 * 1024
+
+
+async def _read_capped(request: Request, limit: int) -> Optional[bytes]:
+    """The request body, or None once it grows past ``limit`` bytes."""
+    body = b""
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            return None
+    return body
+
 
 def _site_label(value: str) -> str:
     """A site is a display label typed by an admin; it grants no access."""
@@ -501,6 +632,34 @@ def _client_view(row, idle_days: int) -> dict:
         "status": status,
         "disabled_reason": row["disabled_reason"],
         "owner_email": row["owner_email"],
+    }
+
+
+# Health card order: what needs attention first.
+HEALTH_ORDER = {
+    "not-publishing": 0,
+    "not-reporting": 1,
+    "no-packets": 2,
+    "healthy": 3,
+    "no-reports": 4,
+}
+
+
+def _health_view(client, latest, rows, now: datetime, spark=()) -> dict:
+    """A shoveler's health from its latest report and its recent reports."""
+    window = [r for r in rows if db.parse_ts(r["received_at"]) >= now - health.WINDOW]
+    status = health.assess(latest, window, now)
+    live = status.status != "not-reporting" and latest is not None
+    return {
+        "client_id": client["client_id"],
+        "site": client["site"],
+        "name": client["client_name"] or client["client_id"],
+        "health": status,
+        "rates": health.current(rows) if live else {"received": None, "published": None},
+        "queue": latest["queue_size"] if live else None,
+        "last_report": health.ago(now - db.parse_ts(latest["received_at"])) if latest else None,
+        "uptime": health.ago(now - db.parse_ts(latest["started_at"])) if live else None,
+        "spark": list(spark),
     }
 
 
