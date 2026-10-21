@@ -709,6 +709,7 @@ def _health_view(client, latest, rows, now: datetime, blocks, token_ttl: int) ->
         "uptime": health.ago(now - db.parse_ts(latest["started_at"])) if latest and not stale else None,
         "blocks": blocks,
         "runs": runs,
+        "changes": health.changes(runs, now),
         "described": health.describe(runs, now) if runs else "",
     }
 

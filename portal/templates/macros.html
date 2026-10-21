@@ -179,13 +179,12 @@
   </ul>
 {% endmacro %}
 
-{# The tracker's runs as text, newest first. #}
-{% macro tracker_changes(runs, labels, now) %}
+{# The tracker's runs as text, newest first (health.changes). #}
+{% macro tracker_changes(changes) %}
   <ol class="divide-y divide-slate-100 text-sm" aria-label="Changes">
-    {% for r in runs | reverse %}
+    {% for r, when in changes %}
       <li class="flex items-baseline gap-4 py-1.5">
-        <span class="w-40 shrink-0 tabular-nums text-slate-500">
-          {{- r.start.strftime("%H:%M") }} – {{ "now" if loop.first else r.end.strftime("%H:%M") }} UTC</span>
+        <span class="w-52 shrink-0 tabular-nums text-slate-500">{{ when }}</span>
         <span class="flex items-center gap-1.5 text-slate-900">
           <span class="flex h-3 w-2.5 items-end" aria-hidden="true"><span class="w-full {{ state_block(r.state) }}"></span></span>{{ r.label }}
         </span>

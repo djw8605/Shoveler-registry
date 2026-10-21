@@ -472,6 +472,20 @@ def pin_onset(runs: list[Run], health: Health) -> list[Run]:
     return runs[:-2] + pinned if len(runs) > 1 else pinned
 
 
+def changes(runs: list[Run], now: datetime) -> list[tuple[Run, str]]:
+    """The runs newest first, each with when it held: "Since 13:26 UTC" for
+    the current one, a date on times before today."""
+    def at(t: datetime) -> str:
+        same_day = t.date() == now.astimezone(timezone.utc).date()
+        return f"{t:%H:%M}" if same_day else f"{t:%Y-%m-%d %H:%M}"
+
+    out = []
+    for i, r in enumerate(reversed(runs)):
+        when = f"Since {at(r.start)} UTC" if i == 0 else f"{at(r.start)} – {at(r.end)} UTC"
+        out.append((r, when))
+    return out
+
+
 def describe(runs: list[Run], now: datetime) -> str:
     """The tracker in words, e.g. for a screen reader."""
     parts = []

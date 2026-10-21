@@ -287,6 +287,13 @@ def test_runs_pin_onset_and_describe():
     h = health.Health("not-publishing", "", since=onset)
     pinned = health.pin_onset(runs, h)
     assert pinned[-1].start == onset and pinned[-2].end == onset
+    assert [w for _, w in health.changes(pinned, NOW)] == [
+        "Since 11:38 UTC", "11:00 – 11:38 UTC"]
+    # A run that began before today carries its date.
+    old = [health.Run("no-data", NOW - timedelta(hours=23), NOW - timedelta(hours=13), 40),
+           health.Run("healthy", NOW - timedelta(hours=13), NOW, 52)]
+    assert [w for _, w in health.changes(old, NOW)] == [
+        "Since 2026-10-20 23:00 UTC", "2026-10-20 13:00 – 2026-10-20 23:00 UTC"]
     assert health.describe(pinned, NOW) == (
         "Healthy from 11:00 UTC to 11:38 UTC; Not publishing from 11:38 UTC to now.")
     # A different state, or an onset far from the run, leaves the runs alone.
