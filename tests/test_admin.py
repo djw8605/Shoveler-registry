@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
 
@@ -199,7 +200,7 @@ def _health_rows(page):
 
 
 def test_dashboard_health_card(client, settings, monkeypatch):
-    seed_client(settings, "shoveler-ok", site="nebraska")
+    seed_client(settings, "shoveler-ok", site="nebraska", client_name="shoveler@xrd1.unl.edu")
     seed_client(settings, "shoveler-stuck", site="wisconsin")
     seed_client(settings, "shoveler-quiet", site="caltech")
     seed_client(settings, "shoveler-new", site="fnal")
@@ -222,10 +223,16 @@ def test_dashboard_health_card(client, settings, monkeypatch):
         ("Healthy", "nebraska"),
         ("No reports", "fnal"),
     ]
+    assert "1 disabled shoveler not shown." in page
+    # The why and since when, in the row (not only in a tooltip).
+    assert "Nothing published since " in page and "No packets received since " in page
     assert "4,321" in page                      # the stuck one's queue
     assert ">2.0<" in page                      # 120 packets/min
-    assert page.count("data-spark=") == 4
-    assert '<script src="/static/vendor/uPlot.iife.min.js" defer></script>' in page
+    assert "xrd1.unl.edu<" in page              # host, without "shoveler@"
+    # A 24 h strip per shoveler that has reported, described for screen readers.
+    assert page.count('role="img" aria-label="') == 3
+    assert "Not publishing from " in page
+    assert "uPlot" not in page and "Updated " in page
     assert 'href="/shovelers/shoveler-ok"' in page
 
 
@@ -240,20 +247,70 @@ def test_shoveler_page(client, settings, monkeypatch):
     _traffic(settings, "shoveler-stuck", published=False, queue=4321)
     _as_admin(monkeypatch)
     page = client.get("/shovelers/shoveler-stuck").text
-    assert "<h1" in page and "shoveler@xrd.wisc.edu" in page
-    assert "Not publishing" in page and "published none to the message bus" in page
+    assert re.search(r"<h1[^>]*>wisconsin</h1>", page) and "xrd.wisc.edu ·" in page
+    assert "Not publishing" in page and "Nothing published since " in page
+    assert "Check that the shoveler can reach RabbitMQ" in page
     assert "4,321" in page and "w@wisc.edu" in page and "v1.5.0" in page
-    # 96 tracker blocks for 24 h, and the chart data.
-    assert page.count('title="') >= 96 and 'id="series"' in page
-    assert 'data-chart="throughput"' in page
+    assert 'data-refresh="60"' in page and "/static/js/refresh.js" in page
+    # 96 tracker blocks for 24 h, the changes in words, and the chart data.
+    assert page.count('title="') >= 96 and 'aria-label="Changes"' in page
+    assert 'id="series"' in page and 'data-chart="throughput"' in page
+    assert "Hourly figures, last 24 hours" in page
+    assert '/credentials/shoveler-stuck/disable' in page
+
+
+def test_shoveler_page_chart_range(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-ok")
+    _traffic(settings, "shoveler-ok", minutes=180)
+    _as_admin(monkeypatch)
+    page = client.get("/shovelers/shoveler-ok?hours=2").text
+    assert "Hourly figures, last 2 hours" in page
+    assert 'href="?hours=2" aria-current="true"' in page
+    series = json.loads(re.search(r'id="series">(.*?)</script>', page).group(1))
+    assert series["t"][-1] - series["t"][0] == 2 * 3600
+    # Anything else falls back to the whole window.
+    for bad in ("5", "x", "-2"):
+        assert "Hourly figures, last 24 hours" in client.get(
+            f"/shovelers/shoveler-ok?hours={bad}").text
 
 
 def test_shoveler_page_without_reports(client, settings, monkeypatch):
     seed_client(settings, "shoveler-new", site="fnal")
     _as_admin(monkeypatch)
     page = client.get("/shovelers/shoveler-new").text
-    assert "This shoveler has never reported" in page
+    assert "Never reported." in page
+    assert '<code class="font-mono text-xs">registry.report_url</code>' in page
     assert 'data-chart=' not in page and "uPlot" not in page
+
+
+def test_shoveler_page_flags_an_expired_token(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-stuck")
+    _traffic(settings, "shoveler-stuck", published=False)
+    conn = db.connect(settings.db_path)
+    try:
+        conn.execute(
+            "UPDATE clients SET last_used_at = ? WHERE client_id = 'shoveler-stuck'",
+            (db.to_iso(datetime.now(timezone.utc) - timedelta(hours=6)),),
+        )
+    finally:
+        conn.close()
+    _as_admin(monkeypatch)
+    assert "Its newest token from this registry expired at " in client.get(
+        "/shovelers/shoveler-stuck").text
+
+
+def test_disable_from_the_shoveler_page_returns_there(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-neb1")
+    _as_admin(monkeypatch)
+    csrf = _csrf(client)
+    resp = client.post("/credentials/shoveler-neb1/disable",
+                       data={"csrf_token": csrf, "next": "/shovelers/shoveler-neb1"})
+    assert resp.url.path == "/shovelers/shoveler-neb1"
+    assert "Shoveler shoveler-neb1 disabled." in resp.text
+    # Only back to that shoveler's own page, never elsewhere.
+    resp = client.post("/credentials/shoveler-neb1/enable",
+                       data={"csrf_token": csrf, "next": "https://evil.example/"})
+    assert resp.url.path == "/dashboard"
 
 
 def test_shoveler_page_unknown_or_pending(client, settings, monkeypatch):

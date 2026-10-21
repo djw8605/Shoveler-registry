@@ -187,23 +187,30 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             known_sites = db.list_known_sites(conn)
             latest = db.latest_reports(conn)
             # The last hour is plenty for health and the current rate; the
-            # sparklines are bucketed in SQL.
+            # trackers are bucketed in SQL.
             recent: dict[str, list] = {}
             for r in db.list_reports(conn, db.to_iso(now - timedelta(hours=1))):
                 recent.setdefault(r["client_id"], []).append(r)
-            sparks = health.sparklines(conn, now, hours)
+            blocks = health.trackers(conn, now, hours, latest)
+            fleet = []
+            for r in client_rows:
+                if r["disabled"]:
+                    continue
+                cid = r["client_id"]
+                rows = recent.get(cid, [])
+                view = _health_view(r, latest.get(cid), rows, now, blocks.get(cid, []),
+                                    settings.token_ttl_seconds)
+                since = view["health"].since
+                if view["health"].status in ("no-packets", "not-publishing") and rows \
+                        and since <= db.parse_ts(rows[0]["received_at"]):
+                    # The problem predates the last hour: date it from the window.
+                    rows = db.list_reports(conn, db.to_iso(now - timedelta(hours=hours)), cid)
+                    view = _health_view(r, latest.get(cid), rows, now, view["blocks"],
+                                        settings.token_ttl_seconds)
+                fleet.append(view)
         finally:
             conn.close()
-        fleet = sorted(
-            (
-                _health_view(r, latest.get(r["client_id"]),
-                             recent.get(r["client_id"], []), now,
-                             sparks.get(r["client_id"], []))
-                for r in client_rows
-                if not r["disabled"]
-            ),
-            key=lambda h: (HEALTH_ORDER[h["health"].status], h["site"], h["name"]),
-        )
+        fleet.sort(key=lambda h: (HEALTH_ORDER[h["health"].status], h["site"], h["host"]))
         return render(
             request,
             "dashboard.html",
@@ -213,11 +220,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             known_sites=known_sites,
             fleet=fleet,
             fleet_counts=Counter(h["health"].status for h in fleet),
+            disabled_count=sum(1 for r in client_rows if r["disabled"]),
+            labels=health.LABELS,
             hours=hours,
+            updated=health.clock(now, now),
         )
 
     @app.get("/shovelers/{client_id}", response_class=HTMLResponse)
-    def shoveler_detail(request: Request, client_id: str):
+    def shoveler_detail(request: Request, client_id: str, hours: str = ""):
         user = current_user(request.session)
         if not user:
             return RedirectResponse("/", status_code=303)
@@ -226,7 +236,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 request, "not_authorized.html", admin_contact=settings.admin_contact
             )
         now = datetime.now(timezone.utc)
-        hours = settings.metrics_retention_hours
+        retention = settings.metrics_retention_hours
+        # The charts can zoom to the last couple of hours; the tracker always
+        # spans the whole retention window.
+        ranges = sorted({min(CHART_ZOOM_HOURS, retention), retention})
+        chart_hours = int(hours) if hours.isdigit() and int(hours) in ranges else retention
         conn = db.connect(settings.db_path)
         try:
             row = db.get_client(conn, client_id)
@@ -235,21 +249,31 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
                 return RedirectResponse("/dashboard", status_code=303)
             latest = db.latest_report(conn, client_id)
             rows = db.list_reports(
-                conn, db.to_iso(now - timedelta(hours=hours)), client_id
+                conn, db.to_iso(now - timedelta(hours=retention)), client_id
             )
+            blocks = health.trackers(
+                conn, now, retention, {client_id: latest} if latest else {}, client_id
+            )[client_id]
         finally:
             conn.close()
+        start = now - timedelta(hours=chart_hours)
+        chart_rows = [r for r in rows if db.parse_ts(r["received_at"]) >= start]
         return render(
             request,
             "shoveler.html",
             client=_client_view(row, settings.idle_days),
-            shoveler=_health_view(row, latest, rows, now),
+            shoveler=_health_view(row, latest, rows, now, blocks, settings.token_ttl_seconds),
             latest=latest,
             totals=health.totals(rows),
             restarts=health.restarts(rows),
-            tracker=health.tracker(rows, now, hours),
-            series=health.series(rows),
-            hours=hours,
+            series=health.series(chart_rows, start, now),
+            hourly=health.hourly(chart_rows, now, chart_hours),
+            hours=retention,
+            chart_hours=chart_hours,
+            ranges=ranges,
+            labels=health.LABELS,
+            now=now,
+            updated=health.clock(now, now),
         )
 
     @app.post("/pending/{client_id}/approve")
@@ -364,7 +388,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
 
     @app.post("/credentials/{client_id}/disable")
     def credentials_disable(
-        request: Request, client_id: str, csrf_token: str = Form(...)
+        request: Request, client_id: str, csrf_token: str = Form(...), next: str = Form("")
     ):
         if not admin_user(request):
             return refuse(request)
@@ -381,11 +405,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         finally:
             conn.close()
         _flash(request.session, f"Shoveler {client_id} disabled.", "info")
-        return RedirectResponse("/dashboard", status_code=303)
+        return RedirectResponse(_back(next, client_id), status_code=303)
 
     @app.post("/credentials/{client_id}/enable")
     def credentials_enable(
-        request: Request, client_id: str, csrf_token: str = Form(...)
+        request: Request, client_id: str, csrf_token: str = Form(...), next: str = Form("")
     ):
         if not admin_user(request):
             return refuse(request)
@@ -402,7 +426,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         finally:
             conn.close()
         _flash(request.session, f"Shoveler {client_id} re-enabled.", "info")
-        return RedirectResponse("/dashboard", status_code=303)
+        return RedirectResponse(_back(next, client_id), status_code=303)
 
     # --- Machine-facing routes ------------------------------------------
 
@@ -595,6 +619,13 @@ async def _read_capped(request: Request, limit: int) -> Optional[bytes]:
     return body
 
 
+def _back(next_url: str, client_id: str) -> str:
+    """Where a disable/re-enable returns to: the shoveler's page if it came
+    from there, else the dashboard (never an arbitrary URL)."""
+    page = f"/shovelers/{client_id}"
+    return page if next_url == page else "/dashboard"
+
+
 def _site_label(value: str) -> str:
     """A site is a display label typed by an admin; it grants no access."""
     value = (value or "").strip()
@@ -636,30 +667,46 @@ def _client_view(row, idle_days: int) -> dict:
 
 
 # Health card order: what needs attention first.
-HEALTH_ORDER = {
-    "not-publishing": 0,
-    "not-reporting": 1,
-    "no-packets": 2,
-    "healthy": 3,
-    "no-reports": 4,
-}
+HEALTH_ORDER = {status: i for i, status in enumerate(health.LABELS)}
+
+# The shorter range a shoveler page's charts can zoom to.
+CHART_ZOOM_HOURS = 2
 
 
-def _health_view(client, latest, rows, now: datetime, spark=()) -> dict:
-    """A shoveler's health from its latest report and its recent reports."""
-    window = [r for r in rows if db.parse_ts(r["received_at"]) >= now - health.WINDOW]
-    status = health.assess(latest, window, now)
-    live = status.status != "not-reporting" and latest is not None
+def _health_view(client, latest, rows, now: datetime, blocks, token_ttl: int) -> dict:
+    """A shoveler's health from its latest report, its recent reports
+    (oldest first) and its tracker blocks."""
+    status = health.assess(latest, rows, now)
+    stale = status.status == "not-reporting"
+    runs = health.pin_onset(health.runs(blocks), status)
+    name = client["client_name"] or client["client_id"]
+    # Without a current token a shoveler can neither publish nor report, and
+    # only this registry knows when it last got one.
+    token_hint = ""
+    if status.status in ("not-publishing", "not-reporting") and client["last_used_at"]:
+        expired = db.parse_ts(client["last_used_at"]) + timedelta(seconds=token_ttl)
+        if expired < now:
+            token_hint = (f"Its newest token from this registry expired at "
+                          f"{health.clock(expired, now)}.")
     return {
         "client_id": client["client_id"],
         "site": client["site"],
-        "name": client["client_name"] or client["client_id"],
+        "name": name,
+        # The shoveler names itself shoveler@<host>; the host is what tells
+        # several shovelers at one site apart.
+        "host": name.removeprefix("shoveler@"),
         "health": status,
-        "rates": health.current(rows) if live else {"received": None, "published": None},
-        "queue": latest["queue_size"] if live else None,
+        "token_hint": token_hint,
+        # Not reporting: the last values it sent, shown as such.
+        "stale": stale,
+        "rates": health.current(rows),
+        "queue": latest["queue_size"] if latest else None,
+        "as_of": health.clock(db.parse_ts(latest["received_at"]), now) if latest else None,
         "last_report": health.ago(now - db.parse_ts(latest["received_at"])) if latest else None,
-        "uptime": health.ago(now - db.parse_ts(latest["started_at"])) if live else None,
-        "spark": list(spark),
+        "uptime": health.ago(now - db.parse_ts(latest["started_at"])) if latest and not stale else None,
+        "blocks": blocks,
+        "runs": runs,
+        "described": health.describe(runs, now) if runs else "",
     }
 
 

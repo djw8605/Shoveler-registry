@@ -24,57 +24,69 @@
   {% endif %}
 
   {% if fleet %}
-    {% call ui.card(title="Health") %}
+    {% call ui.card(title="Health", aside="Updated " ~ updated) %}
       <ul class="mb-4 flex flex-wrap gap-x-5 gap-y-1 text-sm text-slate-600" aria-label="Summary">
-        {% for status, label, dot in [
-             ("not-publishing", "not publishing", "bg-red-500"),
-             ("not-reporting", "not reporting", "bg-red-500"),
-             ("no-packets", "no packets", "bg-amber-500"),
-             ("healthy", "healthy", "bg-green-500"),
-             ("no-reports", "no reports", "bg-slate-400")] if fleet_counts[status] %}
+        {% for status, dot in [
+             ("not-publishing", "bg-red-600"),
+             ("not-reporting", "bg-red-600"),
+             ("no-packets", "bg-amber-600"),
+             ("healthy", "bg-green-600"),
+             ("no-reports", "bg-slate-500")] if fleet_counts[status] %}
           <li class="flex items-center gap-1.5">
             <span class="h-2 w-2 rounded-full {{ dot }}" aria-hidden="true"></span>
-            <span class="font-semibold tabular-nums text-slate-900">{{ fleet_counts[status] }}</span> {{ label }}
+            <span class="font-semibold tabular-nums text-slate-900">{{ fleet_counts[status] }}</span> {{ labels[status] }}
           </li>
         {% endfor %}
       </ul>
-      <div class="overflow-x-auto">
+      <div class="relative overflow-x-auto">
         <table class="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
               <th class="py-2 pr-4">Status</th>
               <th class="py-2 pr-4">Shoveler</th>
-              <th class="py-2 pr-4 text-right">Packets/s</th>
-              <th class="py-2 pr-4">Last {{ hours }} h</th>
-              <th class="py-2 pr-4 text-right">Queue</th>
-              <th class="py-2 pr-4 text-right">Last report</th>
+              <th class="hidden py-2 pr-4 text-right sm:table-cell">Packets/s</th>
+              <th class="hidden py-2 pr-4 md:table-cell">Last {{ hours }} h</th>
+              <th class="hidden py-2 pr-4 text-right sm:table-cell">Queue</th>
+              <th class="py-2 text-right">Last report</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-slate-100">
             {% for h in fleet %}
-              <tr>
+              <tr class="align-top">
                 <td class="py-3 pr-4">{{ ui.health_badge(h.health) }}</td>
                 <td class="py-3 pr-4">
-                  <a href="/shovelers/{{ h.client_id }}" class="font-medium text-slate-900 hover:text-indigo-600">{{ h.site }}</a>
-                  <div class="text-xs text-slate-500">{{ h.name }}</div>
+                  <a href="/shovelers/{{ h.client_id }}" class="font-medium text-slate-900 underline-offset-2 hover:text-indigo-600 hover:underline">{{ h.site }}</a>
+                  <div class="text-xs text-slate-500">{{ h.host }}</div>
+                  {% if h.health.status not in ("healthy", "no-reports") %}
+                    <p class="mt-1 max-w-md text-xs {{ ui.health_text(h.health.status) }}">{{ h.health.summary }}</p>
+                  {% endif %}
                 </td>
-                <td class="py-3 pr-4 text-right tabular-nums text-slate-900">{{ ui.rate(h.rates.received) }}</td>
-                <td class="py-3 pr-4">
-                  <div class="h-7 w-40" data-spark='{{ h.spark | tojson }}'></div>
+                <td class="hidden py-3 pr-4 text-right tabular-nums text-slate-900 sm:table-cell">
+                  {{- ui.rate(none if h.stale else h.rates.received) -}}
                 </td>
-                <td class="py-3 pr-4 text-right tabular-nums text-slate-600">{{ ui.count(h.queue) }}</td>
-                <td class="py-3 pr-4 text-right text-slate-600">{{ h.last_report ~ " ago" if h.last_report else "never" }}</td>
+                <td class="hidden py-3 pr-4 md:table-cell">
+                  {% if h.runs %}{{ ui.tracker_strip(h.runs, h.blocks | length, h.described) }}{% endif %}
+                </td>
+                <td class="hidden py-3 pr-4 text-right tabular-nums text-slate-600 sm:table-cell">
+                  {{- ui.count(none if h.stale else h.queue) -}}
+                </td>
+                <td class="whitespace-nowrap py-3 text-right text-slate-600">{{ h.last_report ~ " ago" if h.last_report else "never" }}</td>
               </tr>
             {% endfor %}
           </tbody>
         </table>
       </div>
+      {% if disabled_count %}
+        <p class="mt-3 text-xs text-slate-500">
+          {{ disabled_count }} disabled shoveler{{ "s" if disabled_count != 1 }} not shown.
+        </p>
+      {% endif %}
     {% endcall %}
   {% endif %}
 
   {% call ui.card(title="Registered shovelers") %}
     {% if clients %}
-      <div class="overflow-x-auto">
+      <div class="relative overflow-x-auto">
         <table class="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -100,7 +112,7 @@
                 <td class="py-3 pr-4">
                   {{ ui.badge(c.status) }}
                   {% if c.disabled_reason %}
-                    <span class="ml-1 text-xs text-slate-400">({{ c.disabled_reason }})</span>
+                    <span class="ml-1 text-xs text-slate-500">({{ c.disabled_reason }})</span>
                   {% endif %}
                 </td>
                 <td class="py-3 pr-4 text-slate-600">{{ c.created_at[:10] }}</td>
@@ -142,7 +154,7 @@
     </form>
 
     {% if reg_tokens %}
-      <div class="overflow-x-auto">
+      <div class="relative overflow-x-auto">
         <table class="min-w-full divide-y divide-slate-200 text-sm">
           <thead>
             <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -188,9 +200,4 @@
     {% endif %}
   {% endcall %}
 </div>
-{% endblock %}
-
-{% block scripts %}
-  <script src="/static/vendor/uPlot.iife.min.js" defer></script>
-  <script src="/static/js/charts.js" defer></script>
 {% endblock %}

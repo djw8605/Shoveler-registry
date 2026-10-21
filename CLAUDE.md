@@ -28,13 +28,13 @@ Charts are uPlot (vendored from npm at build time, plain JS, no CDN).
 | `keys.py` | RSA key gen/load, JWKS, `KeyStore`, manifest-based rotation. CLI: `python -m portal.keys generate|list`. |
 | `registration.py` | `/register` logic (`register`): token-less pending registration or an admin-made bearer registration token, RFC 7591 metadata validation, idempotent retry. |
 | `tokens.py` | `/token` logic (`issue_token`): `private_key_jwt` assertion verification + replay check, claim building, registration-token generation/hashing, in-process `RateLimiter`. |
-| `health.py` | `/report` body validation (`parse_report`), and the dashboard's view of reports: rates (`series`, `current`, `sparkline`), `tracker`, `totals`, and the health rules (`assess`). |
+| `health.py` | `/report` body validation (`parse_report`), the health rules and onset (`assess` → `Health` with `summary`/`advice`/`since`), and the views of reports: chart `series`, `hourly`, `current`, `totals`, `restarts`, and the tracker (`trackers` → `Block`s, bucketed in SQL by `db.report_buckets`; `runs`, `pin_onset`, `describe`). One state vocabulary: `health.LABELS`. |
 | `authz.py` | `is_admin(admin_group, groups)`: the only authorization check. |
 | `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
 | `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()`/`admin_user()`/`refuse()` helpers, machine endpoints (`/token`, `/register`, `/report`). |
 | `expire.py` | Expiry subcommand (idle clients, stale pending registrations, old health reports): `python -m portal.expire`. |
 | `templates/` | Jinja2: `base`, `macros`, `login`, `dashboard`, `shoveler` (one shoveler's health), `registration_token`, `not_authorized`. |
-| `static/js/charts.js` | Draws the uPlot charts from data the templates embed (`data-spark`, `#series`). |
+| `static/js/` | `charts.js` draws the uPlot charts from the `#series` JSON the shoveler page embeds; `refresh.js` reloads that page every minute, pausably (a meta refresh fails WCAG 2.2.1). |
 
 ## Dev setup & commands
 
@@ -129,11 +129,18 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   `@import`ed into `assets/app.css`. After editing templates, the
   build re-scans `portal/templates/**/*.html` and purges unused classes.
 - Reuse `templates/macros.html` (`button`, `card`, `badge`, `flash`, and for
-  health `health_badge`, `stat`, `tracker`, `rate`, `count`) instead of
+  health `health_badge`, `health_text`, `rate`, `count`, `state_block`,
+  `tracker`, `tracker_strip`, `tracker_legend`, `tracker_changes`) instead of
   copy-pasting long utility-class strings. The base template links the compiled
   CSS and nothing else (no CDN); pages with charts add uPlot and `charts.js` in
   their `scripts` block. Chart data goes in the page as JSON (`tojson`), never
   fetched from another endpoint.
+- Health states look the same everywhere (badge, tracker, legend, dashboard
+  strip): green healthy, amber no packets, red not publishing, hollow red not
+  reporting; "no packets" and "no data" blocks are half height so states
+  differ by shape too. Red is only for states, so the charts never use it.
+  Show times in UTC. Rules that style uPlot's own markup go outside any
+  `@layer` in `assets/app.css`, or Tailwind purges them.
 
 ## Testing notes
 

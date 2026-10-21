@@ -12,6 +12,14 @@
   html {
     font-feature-settings: "cv11", "ss01";
   }
+  /* Links get the same focus ring as buttons, not the browser's default. */
+  a:focus-visible,
+  summary:focus-visible {
+    @apply rounded-sm outline-none ring-2 ring-indigo-600 ring-offset-2;
+  }
+  ::selection {
+    @apply bg-indigo-100 text-slate-900;
+  }
 }
 
 @layer components {
@@ -20,4 +28,30 @@
   .focusable {
     @apply focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2;
   }
+}
+
+/* uPlot's legend as a quiet one-line key under each chart. Outside any
+   @layer: these classes only appear in uPlot's markup, so Tailwind would
+   purge a layered rule. */
+.uplot .u-legend {
+  @apply mt-1 text-xs text-slate-600;
+}
+.uplot .u-legend th {
+  @apply font-normal;
+}
+.uplot .u-legend .u-marker {
+  @apply h-2.5 w-2.5 rounded-sm;
+}
+.uplot .u-legend .u-value {
+  @apply font-medium tabular-nums text-slate-900;
+}
+.uplot .u-series > * {
+  padding: 2px 4px;
+}
+.uplot .u-inline.u-live th::after {
+  content: "";
+}
+/* The time column needs no label: its value (shown while hovering) is a time. */
+.uplot .u-legend .u-series:first-child th {
+  display: none;
 }

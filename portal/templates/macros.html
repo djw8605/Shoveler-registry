@@ -12,14 +12,15 @@
   <button type="{{ type }}" class="{{ cls }} {{ extra }}">{{ label }}</button>
 {% endmacro %}
 
-{% macro card(title="") %}
-  <section class="rounded-lg border border-slate-200 bg-white shadow-sm">
+{% macro card(title="", aside="", fill=false) %}
+  <section class="rounded-lg border border-slate-200 bg-white shadow-sm {{ 'flex h-full flex-col' if fill }}">
     {% if title %}
-      <header class="border-b border-slate-200 px-5 py-3">
+      <header class="flex flex-wrap items-baseline justify-between gap-x-4 border-b border-slate-200 px-5 py-3">
         <h2 class="text-sm font-semibold text-slate-900">{{ title }}</h2>
+        {% if aside %}<p class="text-xs text-slate-500">{{ aside }}</p>{% endif %}
       </header>
     {% endif %}
-    <div class="px-5 py-4">{{ caller() }}</div>
+    <div class="px-5 py-4 {{ 'flex flex-1 items-center' if fill }}">{{ caller() }}</div>
   </section>
 {% endmacro %}
 
@@ -57,7 +58,7 @@
     Approve only one you recognise: its <code class="font-mono text-xs">client_id</code>
     appears in the shoveler's log ("registration complete, client_id: …").
   </p>
-  <div class="overflow-x-auto">
+  <div class="relative overflow-x-auto">
     <table class="min-w-full divide-y divide-slate-200 text-sm">
       <thead>
         <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -104,51 +105,91 @@
 {# Shoveler health (health.Health): a coloured dot and its label. #}
 {% macro health_badge(h) %}
   {%- if h.status == "healthy" -%}
-    {%- set cls, dot = "bg-green-50 text-green-700 ring-green-600/20", "bg-green-500" -%}
+    {%- set cls, dot = "bg-green-50 text-green-700 ring-green-600/20", "bg-green-600" -%}
   {%- elif h.status == "no-packets" -%}
-    {%- set cls, dot = "bg-amber-50 text-amber-800 ring-amber-600/30", "bg-amber-500" -%}
+    {%- set cls, dot = "bg-amber-50 text-amber-800 ring-amber-600/30", "bg-amber-600" -%}
   {%- elif h.status == "no-reports" -%}
-    {%- set cls, dot = "bg-slate-50 text-slate-600 ring-slate-500/20", "bg-slate-400" -%}
+    {%- set cls, dot = "bg-slate-50 text-slate-600 ring-slate-500/20", "bg-slate-500" -%}
   {%- else -%}
-    {%- set cls, dot = "bg-red-50 text-red-700 ring-red-600/20", "bg-red-500" -%}
+    {%- set cls, dot = "bg-red-50 text-red-700 ring-red-600/20", "bg-red-600" -%}
   {%- endif -%}
-  <span class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset {{ cls }}" title="{{ h.detail }}">
+  <span class="inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset {{ cls }}">
     <span class="h-1.5 w-1.5 rounded-full {{ dot }}" aria-hidden="true"></span>{{ h.label }}
   </span>
 {% endmacro %}
 
+{# Text colour for a health status's own words (summary lines). #}
+{% macro health_text(status) -%}
+  {%- if status == "no-packets" -%}text-amber-800
+  {%- elif status in ("not-publishing", "not-reporting") -%}text-red-700
+  {%- else -%}text-slate-500{%- endif -%}
+{%- endmacro %}
+
 {# A packets/s figure: whole numbers from 10 up, one decimal below. #}
 {% macro rate(value) -%}
-  {%- if value is none -%}<span class="text-slate-400">—</span>
+  {%- if value is none -%}<span class="text-slate-500">—</span>
   {%- elif value >= 10 -%}{{ "{:,.0f}".format(value) }}
   {%- else -%}{{ "{:,.1f}".format(value) }}
   {%- endif -%}
 {%- endmacro %}
 
 {% macro count(value) -%}
-  {%- if value is none -%}<span class="text-slate-400">—</span>
+  {%- if value is none -%}<span class="text-slate-500">—</span>
   {%- else -%}{{ "{:,}".format(value) }}
   {%- endif -%}
 {%- endmacro %}
 
-{# One headline number on the shoveler page. #}
-{% macro stat(label, hint="") %}
-  <div class="rounded-lg border border-slate-200 bg-white px-4 py-3 shadow-sm">
-    <dt class="text-xs font-medium text-slate-500">{{ label }}</dt>
-    <dd class="mt-1 text-2xl font-semibold tabular-nums tracking-tight text-slate-900">{{ caller() }}</dd>
-    {% if hint %}<p class="mt-0.5 text-xs text-slate-500">{{ hint }}</p>{% endif %}
+{# Tracker colours: the badge colours, with "no packets" and "no data" drawn
+   half height (traffic stopped) and "not reporting" hollow (nothing heard),
+   so the states differ in shape as well as colour. #}
+{% macro state_block(state) -%}
+  {%- if state == "healthy" -%}h-full bg-green-600
+  {%- elif state == "no-packets" -%}h-1/2 bg-amber-600
+  {%- elif state == "not-publishing" -%}h-full bg-red-600
+  {%- elif state == "not-reporting" -%}h-full bg-red-50 ring-1 ring-inset ring-red-600
+  {%- else -%}h-1/2 bg-slate-300{%- endif -%}
+{%- endmacro %}
+
+{# The tracker: one block per 15 minutes (health.tracker), hover for detail.
+   Hidden from screen readers: tracker_changes says the same in words. #}
+{% macro tracker(blocks) %}
+  <div class="flex h-9 items-end gap-px" aria-hidden="true">
+    {% for b in blocks %}
+      <div class="flex-1 first:rounded-l-sm last:rounded-r-sm {{ state_block(b.state) }}" title="{{ b.title }}"></div>
+    {% endfor %}
   </div>
 {% endmacro %}
 
-{# The 24-hour strip: one block per 15 minutes (health.tracker). #}
-{% macro tracker(blocks) %}
-  <div class="flex h-8 gap-px" role="img" aria-label="Reporting over time, one block per 15 minutes">
-    {% for b in blocks %}
-      {%- if b.state == "ok" -%}{%- set cls = "bg-green-500" -%}
-      {%- elif b.state == "warn" -%}{%- set cls = "bg-amber-400" -%}
-      {%- elif b.state == "missing" -%}{%- set cls = "bg-red-500" -%}
-      {%- else -%}{%- set cls = "bg-slate-200" -%}{%- endif -%}
-      <div class="flex-1 rounded-[1px] first:rounded-l last:rounded-r {{ cls }}" title="{{ b.title }}"></div>
+{# The same as one thin bar of runs, for a dashboard row. #}
+{% macro tracker_strip(runs, blocks, described) %}
+  <div class="flex h-3 w-36 items-end overflow-hidden rounded-sm" role="img" aria-label="{{ described }}">
+    {% for r in runs %}
+      <div class="{{ state_block(r.state) }}" style="width: {{ (100 * r.blocks / blocks) | round(3) }}%" title="{{ r.label }}"></div>
     {% endfor %}
   </div>
+{% endmacro %}
+
+{% macro tracker_legend(labels, states) %}
+  <ul class="flex flex-wrap gap-x-4 gap-y-1 text-xs text-slate-600">
+    {% for state in states %}
+      <li class="flex items-center gap-1.5">
+        <span class="flex h-3 w-2.5 items-end" aria-hidden="true"><span class="w-full {{ state_block(state) }}"></span></span>{{ labels[state] }}
+      </li>
+    {% endfor %}
+  </ul>
+{% endmacro %}
+
+{# The tracker's runs as text, newest first. #}
+{% macro tracker_changes(runs, labels, now) %}
+  <ol class="divide-y divide-slate-100 text-sm" aria-label="Changes">
+    {% for r in runs | reverse %}
+      <li class="flex items-baseline gap-4 py-1.5">
+        <span class="w-40 shrink-0 tabular-nums text-slate-500">
+          {{- r.start.strftime("%H:%M") }} – {{ "now" if loop.first else r.end.strftime("%H:%M") }} UTC</span>
+        <span class="flex items-center gap-1.5 text-slate-900">
+          <span class="flex h-3 w-2.5 items-end" aria-hidden="true"><span class="w-full {{ state_block(r.state) }}"></span></span>{{ r.label }}
+        </span>
+      </li>
+    {% endfor %}
+  </ol>
 {% endmacro %}

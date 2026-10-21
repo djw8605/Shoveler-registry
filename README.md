@@ -56,7 +56,7 @@ portal/
   main.py       FastAPI app, routes, middleware, CSRF
   expire.py     expiry subcommand (idle clients, stale pending registrations, old reports)
   templates/    base, macros, login, dashboard, shoveler, registration_token, not_authorized
-  static/js/    charts.js: draws the health charts with uPlot
+  static/js/    charts.js: the health charts (uPlot); refresh.js: pausable auto-refresh
   static/css/   compiled app.css (build artifact)
   static/vendor/  uPlot, copied from node_modules (build artifact)
 assets/app.css  Tailwind source (source of truth)
@@ -136,17 +136,28 @@ Admins see one dashboard with:
 - **Registered shovelers:** every approved shoveler (site, `client_id`, name,
   key thumbprint, who approved it, status, created, last used), with
   **Disable** (`disabled_reason='disabled-by-admin'`) and **Re-enable**.
-- **Health:** every enabled shoveler's health from its reports, worst first,
-  with its packet rate now, a sparkline of the last day, its queue and when it
-  last reported. Each links to the shoveler's page (below).
+- **Health:** every enabled shoveler's health from its reports, worst first.
+  A row that isn't healthy says what is wrong and since when ("Nothing
+  published since 02:32 UTC (46 min ago)"). Each row also shows the packet
+  rate now, a 24-hour strip of its health, its queue and when it last
+  reported, and links to the shoveler's page (below).
 - **Registration tokens:** create a one-time token for a site, for a shoveler
   that should be active without a separate approval; revoke unused ones.
 
-Each approved shoveler also has a page, `/shovelers/<client_id>`, with its
-health and why, headline numbers, a 24-hour strip of 15-minute blocks
-(sending, no packets or none published, no reports), charts of packets per
-second (received and published), queue size and errors per minute, and its
-registration details.
+Each approved shoveler also has a page, `/shovelers/<client_id>`:
+
+- what is wrong, since when, and what to check (including when its newest
+  token from this registry expired, if it has);
+- received → queued → published right now, and the last 24 hours' failed
+  validations, bus reconnects and restarts;
+- a 24-hour tracker of 15-minute blocks in the same states as the badges,
+  with its changes listed in words;
+- uPlot charts of packets per second (received and published), queue size
+  and errors per minute over the last 2 or 24 hours (drag to zoom), with the
+  same figures as an hourly table;
+- its registration details, and Disable / Re-enable.
+
+All times are UTC. The page reloads every minute unless paused.
 
 A site is only a label for grouping and display; it grants nobody access.
 Group memberships are captured into the session **at login**, so COmanage

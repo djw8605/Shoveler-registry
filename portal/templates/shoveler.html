@@ -1,85 +1,203 @@
 {% extends "base.html" %}
 {% import "macros.html" as ui %}
-{% block title %}{{ shoveler.name }} · {{ portal_name }}{% endblock %}
+{% block title %}{{ shoveler.site }}: {{ shoveler.host }} · {{ portal_name }}{% endblock %}
 {% block flash %}{{ ui.flash(flashes) }}{% endblock %}
 
+{% macro chevron() %}
+  <svg class="h-4 w-4 shrink-0 text-slate-300" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+    <path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 0 1 .02-1.06L11.17 10 7.23 6.29a.75.75 0 1 1 1.04-1.08l4.5 4.25a.75.75 0 0 1 0 1.08l-4.5 4.25a.75.75 0 0 1-1.06-.02Z" clip-rule="evenodd" />
+  </svg>
+{% endmacro %}
+
+{# One stage of the shoveler's pipeline: received, queued, published. #}
+{% macro stage(label, unit, alert="") %}
+  <div class="min-w-0 flex-1">
+    <dt class="text-xs font-medium text-slate-500">{{ label }}</dt>
+    <dd class="mt-1 flex flex-col sm:flex-row sm:items-baseline sm:gap-1.5">
+      <span class="text-xl font-semibold tabular-nums tracking-tight sm:text-2xl {{ alert or ('text-slate-500' if shoveler.stale else 'text-slate-900') }}">{{ caller() }}</span>
+      <span class="text-xs text-slate-500">{{ unit }}</span>
+    </dd>
+  </div>
+{% endmacro %}
+
+{% macro figure(label, hint="") %}
+  <div class="flex items-baseline justify-between gap-4 py-2">
+    <dt class="text-sm text-slate-600">{{ label }}</dt>
+    <dd class="text-right">
+      <span class="text-base font-semibold tabular-nums text-slate-900">{{ caller() }}</span>
+      {% if hint %}<span class="block text-xs text-slate-500">{{ hint }}</span>{% endif %}
+    </dd>
+  </div>
+{% endmacro %}
+
 {% block content %}
+{% set status = shoveler.health.status %}
 <div class="space-y-6">
   <div>
-    <a href="/dashboard" class="text-sm font-medium text-indigo-600 hover:text-indigo-500">&larr; All shovelers</a>
-    <div class="mt-3 flex flex-wrap items-center gap-3">
-      <h1 class="text-xl font-semibold tracking-tight text-slate-900">{{ shoveler.name }}</h1>
-      {{ ui.health_badge(shoveler.health) }}
-      {% if client.status == "disabled" %}{{ ui.badge("disabled") }}{% endif %}
+    <div class="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+      <a href="/dashboard" class="text-sm font-medium text-indigo-600 underline-offset-2 hover:text-indigo-500 hover:underline">&larr; All shovelers</a>
+      <p class="flex items-baseline gap-2 text-xs text-slate-500">
+        Updated {{ updated }}
+        {# Health changes by the minute; refresh.js reloads the page, pausably. #}
+        <button type="button" data-refresh="60" hidden
+                class="rounded-sm font-medium text-indigo-600 underline-offset-2 hover:underline focus:outline-none focus-visible:ring-2 focus-visible:ring-indigo-600 focus-visible:ring-offset-2">Pause auto-refresh</button>
+      </p>
     </div>
-    <p class="mt-1 text-sm text-slate-500">
-      {{ client.site }} · <span class="font-mono text-xs">{{ client.client_id }}</span>
-      {% if latest and latest.version %} · {{ latest.version }}{% endif %}
-      {% if shoveler.uptime %} · up {{ shoveler.uptime }}{% endif %}
+    <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
+      <div class="flex flex-wrap items-center gap-3">
+        <h1 class="text-xl font-semibold tracking-tight text-slate-900">{{ shoveler.site }}</h1>
+        {{ ui.health_badge(shoveler.health) }}
+        {% if client.status == "disabled" %}{{ ui.badge("disabled") }}{% endif %}
+      </div>
+      {% if client.status != "disabled" %}
+        <form method="post" action="/credentials/{{ client.client_id }}/disable"
+              onsubmit="return confirm('Disable {{ client.client_id }} ({{ client.site }})? The shoveler will stop getting tokens.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <input type="hidden" name="next" value="/shovelers/{{ client.client_id }}" />
+          {{ ui.button("Disable", "submit", "danger") }}
+        </form>
+      {% else %}
+        <form method="post" action="/credentials/{{ client.client_id }}/enable"
+              onsubmit="return confirm('Re-enable {{ client.client_id }}? The shoveler can get tokens again with its existing key.');">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+          <input type="hidden" name="next" value="/shovelers/{{ client.client_id }}" />
+          {{ ui.button("Re-enable", "submit", "secondary") }}
+        </form>
+      {% endif %}
+    </div>
+    <p class="mt-1 text-sm text-slate-600">
+      {{ shoveler.host }} · <span class="font-mono text-xs">{{ client.client_id }}</span>
+      {%- if latest and latest.version %} · {{ latest.version }}{% endif %}
+      {%- if shoveler.uptime %} · up {{ shoveler.uptime }}{% endif %}
     </p>
   </div>
 
-  {% if shoveler.health.status != "healthy" %}
-    {%- if shoveler.health.status == "no-packets" -%}
+  {% if status != "healthy" %}
+    {%- if status == "no-packets" -%}
       {%- set cls = "border-amber-200 bg-amber-50 text-amber-900" -%}
-    {%- elif shoveler.health.status == "no-reports" -%}
+    {%- elif status == "no-reports" -%}
       {%- set cls = "border-slate-200 bg-white text-slate-700" -%}
     {%- else -%}
       {%- set cls = "border-red-200 bg-red-50 text-red-800" -%}
     {%- endif -%}
-    <div class="rounded-md border px-4 py-3 text-sm {{ cls }}" role="status">{{ shoveler.health.detail }}</div>
-  {% endif %}
-
-  {% if latest %}
-    <dl class="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
-      {% call ui.stat("Packets/s") %}{{ ui.rate(shoveler.rates.received) }}{% endcall %}
-      {% call ui.stat("Published/s") %}{{ ui.rate(shoveler.rates.published) }}{% endcall %}
-      {% call ui.stat("Queue") %}{{ ui.count(shoveler.queue) }}{% endcall %}
-      {% call ui.stat("Failed validation", "last " ~ hours ~ " h") %}{{ ui.count(totals.validations_failed) }}{% endcall %}
-      {% call ui.stat("Bus reconnects", "last " ~ hours ~ " h") %}{{ ui.count(totals.rabbitmq_reconnects) }}{% endcall %}
-      {% call ui.stat("Restarts", "last " ~ hours ~ " h") %}{{ ui.count(restarts) }}{% endcall %}
-    </dl>
-
-    {% call ui.card(title="Last " ~ hours ~ " hours") %}
-      {{ ui.tracker(tracker) }}
-      <div class="mt-2 flex flex-wrap justify-between gap-2 text-xs text-slate-500">
-        <span>{{ tracker[0].start.strftime("%H:%M") }} UTC</span>
-        <ul class="flex flex-wrap gap-x-4 gap-y-1">
-          <li class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-green-500" aria-hidden="true"></span>Sending</li>
-          <li class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-amber-400" aria-hidden="true"></span>No packets or none published</li>
-          <li class="flex items-center gap-1.5"><span class="h-2 w-2 rounded-sm bg-red-500" aria-hidden="true"></span>No reports</li>
-        </ul>
-        <span>now</span>
-      </div>
-    {% endcall %}
-
-    <script type="application/json" id="series">{{ series | tojson }}</script>
-    {% call ui.card(title="Packets per second") %}
-      <div data-chart="throughput" class="h-56"></div>
-    {% endcall %}
-    <div class="grid gap-6 lg:grid-cols-2">
-      {% call ui.card(title="Queue") %}
-        <div data-chart="queue" class="h-44"></div>
-      {% endcall %}
-      {% call ui.card(title="Errors per minute") %}
-        <div data-chart="errors" class="h-44"></div>
-      {% endcall %}
+    <div class="rounded-md border px-4 py-3 text-sm {{ cls }}" role="status">
+      <p class="font-medium">{{ shoveler.health.summary }}</p>
+      <p class="mt-1">
+        {%- if shoveler.token_hint %}{{ shoveler.token_hint }} {% endif -%}
+        {{ shoveler.health.advice | e | replace("registry.report_url", '<code class="font-mono text-xs">registry.report_url</code>' | safe) }}
+      </p>
     </div>
   {% endif %}
 
-  {% call ui.card(title="Details") %}
-    <dl class="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2">
+  {% if latest %}
+    <div class="grid gap-6 lg:grid-cols-5">
+      <div class="lg:col-span-3">
+      {% call ui.card(title="Now" if not shoveler.stale else "Last reported, " ~ shoveler.as_of, fill=true) %}
+        {% if status == "not-publishing" %}{% set published_alert = "text-red-700" %}{% endif %}
+        {% if status == "no-packets" %}{% set received_alert = "text-amber-800" %}{% endif %}
+        <dl class="flex w-full items-center gap-2 sm:gap-3">
+          {% call stage("Received", "packets/s", received_alert) %}{{ ui.rate(shoveler.rates.received) }}{% endcall %}
+          {{ chevron() }}
+          {% call stage("Queued", "messages") %}{{ ui.count(shoveler.queue) }}{% endcall %}
+          {{ chevron() }}
+          {% call stage("Published", "messages/s", published_alert) %}{{ ui.rate(shoveler.rates.published) }}{% endcall %}
+        </dl>
+      {% endcall %}
+      </div>
+      <div class="lg:col-span-2">
+        {% call ui.card(title="Last " ~ hours ~ " hours") %}
+          <dl class="-my-2 divide-y divide-slate-100">
+            {% set failed, received = totals.validations_failed, totals.packets_received %}
+            {% call figure("Failed validation", ("{:.1%} of packets".format(failed / received)) if received else "") %}{{ ui.count(failed) }}{% endcall %}
+            {% call figure("Bus reconnects") %}{{ ui.count(totals.rabbitmq_reconnects) }}{% endcall %}
+            {% call figure("Restarts", ("last at " ~ restarts[-1].strftime("%H:%M") ~ " UTC") if restarts else "") %}{{ restarts | length }}{% endcall %}
+          </dl>
+        {% endcall %}
+      </div>
+    </div>
+  {% endif %}
+
+  {% call ui.card(title="Health, last " ~ hours ~ " hours") %}
+    {{ ui.tracker(shoveler.blocks) }}
+    <div class="mt-1.5 flex justify-between text-xs tabular-nums text-slate-500">
+      <span>{{ shoveler.blocks[0].start.strftime("%H:%M") }} UTC</span>
+      <span>now</span>
+    </div>
+    <div class="mt-3">{{ ui.tracker_legend(labels, ["healthy", "no-packets", "not-publishing", "not-reporting", "no-data"]) }}</div>
+    <h3 class="mt-5 text-xs font-medium text-slate-500">Changes</h3>
+    {{ ui.tracker_changes(shoveler.runs, labels, now) }}
+  {% endcall %}
+
+  {% if latest %}
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <h2 class="text-sm font-semibold text-slate-900">Charts <span class="font-normal text-slate-500">· drag across a chart to zoom, double-click to reset</span></h2>
+      <nav class="inline-flex rounded-md bg-slate-100 p-0.5 text-sm" aria-label="Chart range">
+        {% for h in ranges %}
+          <a href="?hours={{ h }}" {% if h == chart_hours %}aria-current="true"{% endif %}
+             class="rounded px-3 py-1 font-medium {{ 'bg-white text-slate-900 shadow-sm' if h == chart_hours else 'text-slate-600 hover:text-slate-900' }}">Last {{ h }} h</a>
+        {% endfor %}
+      </nav>
+    </div>
+    <script type="application/json" id="series">{{ series | tojson }}</script>
+    {% call ui.card(title="Packets per second") %}
+      <div data-chart="throughput" class="h-60" role="img"
+           aria-label="Packets received and messages published per second, last {{ chart_hours }} hours. See the hourly figures below."></div>
+    {% endcall %}
+    <div class="grid gap-6 lg:grid-cols-2">
+      {% call ui.card(title="Queue") %}
+        <div data-chart="queue" class="h-52" role="img"
+             aria-label="Messages waiting to be published, last {{ chart_hours }} hours. See the hourly figures below."></div>
+      {% endcall %}
+      {% call ui.card(title="Errors per minute") %}
+        <div data-chart="errors" class="h-52" role="img"
+             aria-label="Packets that failed validation and message bus reconnects per minute, last {{ chart_hours }} hours. See the hourly figures below."></div>
+      {% endcall %}
+    </div>
+
+    <details class="group rounded-lg border border-slate-200 bg-white shadow-sm">
+      <summary class="cursor-pointer select-none px-5 py-3 text-sm font-semibold text-slate-900">Hourly figures, last {{ chart_hours }} hours (UTC)</summary>
+      <div class="relative overflow-x-auto border-t border-slate-200 px-5 py-3">
+        <table class="min-w-full text-sm tabular-nums">
+          <thead>
+            <tr class="text-right text-xs font-medium uppercase tracking-wide text-slate-500">
+              <th class="py-2 pr-4 text-left">Hour</th>
+              <th class="py-2 pr-4">Received/s</th>
+              <th class="py-2 pr-4">Published/s</th>
+              <th class="py-2 pr-4">Max queue</th>
+              <th class="py-2 pr-4">Failed validation</th>
+              <th class="py-2">Reconnects</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100 text-right text-slate-700">
+            {% for row in hourly %}
+              <tr>
+                <td class="py-1.5 pr-4 text-left text-slate-500">{{ row.start.strftime("%H:%M") }}</td>
+                {% if row.reports %}
+                  <td class="py-1.5 pr-4">{{ ui.rate(row.received_rate) }}</td>
+                  <td class="py-1.5 pr-4">{{ ui.rate(row.published_rate) }}</td>
+                  <td class="py-1.5 pr-4">{{ ui.count(row.queue) }}</td>
+                  <td class="py-1.5 pr-4">{{ ui.count(row.failed) }}</td>
+                  <td class="py-1.5">{{ ui.count(row.reconnects) }}</td>
+                {% else %}
+                  <td class="py-1.5 text-left text-slate-500" colspan="5">No reports</td>
+                {% endif %}
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </details>
+  {% endif %}
+
+  {% call ui.card(title="Registration") %}
+    <dl class="grid gap-x-6 gap-y-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
       {% for label, value in [
-           ("Client ID", client.client_id),
-           ("Name", client.client_name or "—"),
-           ("Key thumbprint", client.thumbprint ~ "…"),
-           ("Approved by", client.owner_email or "—"),
-           ("Registered", client.created_at[:16] | replace("T", " ")),
-           ("Token last used", client.last_used_at[:16] | replace("T", " ") if client.last_used_at else "—"),
-           ("Version", latest.version if latest and latest.version else "—"),
-           ("Process started", latest.started_at[:16] | replace("T", " ") if latest else "—"),
+           ("Token last issued", (client.last_used_at[:16] | replace("T", " ")) ~ " UTC" if client.last_used_at else "Never by this registry"),
+           ("Process started", (latest.started_at[:16] | replace("T", " ")) ~ " UTC" if latest else "—"),
            ("Reports every", (latest.interval_seconds ~ " s") if latest else "—"),
-           ("Last report", (shoveler.last_report ~ " ago") if shoveler.last_report else "never"),
+           ("Approved by", client.owner_email or "—"),
+           ("Registered", (client.created_at[:16] | replace("T", " ")) ~ " UTC"),
+           ("Key thumbprint", client.thumbprint ~ "…"),
          ] %}
         <div>
           <dt class="text-xs font-medium text-slate-500">{{ label }}</dt>
@@ -92,6 +210,7 @@
 {% endblock %}
 
 {% block scripts %}
+  <script src="/static/js/refresh.js" defer></script>
   {% if latest %}
     <script src="/static/vendor/uPlot.iife.min.js" defer></script>
     <script src="/static/js/charts.js" defer></script>

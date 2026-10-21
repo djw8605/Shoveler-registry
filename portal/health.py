@@ -37,8 +37,18 @@ STALE_AFTER_MIN = timedelta(minutes=3)
 # EVIDENCE_MIN of it from the running process.
 WINDOW = timedelta(minutes=15)
 EVIDENCE_MIN = timedelta(minutes=5)
-# The dashboard sparklines' bucket width.
-SPARK_BUCKET = timedelta(minutes=15)
+# One tracker block (and hourly-table row) covers this long.
+BUCKET = timedelta(minutes=15)
+
+# Badge labels, worst first; the tracker adds "no-data" (before any report).
+LABELS = {
+    "not-publishing": "Not publishing",
+    "not-reporting": "Not reporting",
+    "no-packets": "No packets",
+    "healthy": "Healthy",
+    "no-reports": "No reports",
+    "no-data": "No data",
+}
 
 
 class ReportError(Exception):
@@ -130,18 +140,39 @@ def _delta(prev, cur, name: str) -> Optional[int]:
     return b - a
 
 
-def series(rows) -> dict:
+def ago(delta: timedelta) -> str:
+    """'45 s', '12 min', '3 h', '2 d'."""
+    s = max(0, int(delta.total_seconds()))
+    if s < 90:
+        return f"{s} s"
+    if s < 90 * 60:
+        return f"{round(s / 60)} min"
+    if s < 36 * 3600:
+        return f"{round(s / 3600)} h"
+    return f"{round(s / 86400)} d"
+
+
+def clock(at: datetime, now: datetime) -> str:
+    """'02:15 UTC', with the date when it isn't today."""
+    at = at.astimezone(timezone.utc)
+    same_day = at.date() == now.astimezone(timezone.utc).date()
+    return f"{at:%H:%M} UTC" if same_day else f"{at:%Y-%m-%d %H:%M} UTC"
+
+
+def series(rows, start: datetime, end: datetime) -> dict:
     """Chart data for one client's reports (oldest first), in uPlot's layout.
 
     ``t`` is unix seconds; counters become per-second rates (errors per
     minute) between consecutive reports, None where the line must break.
+    Empty points at ``start`` and ``end`` make the charts span that window
+    whatever the reports cover.
     """
-    out = {k: [] for k in ("t", "received", "published", "failed", "reconnects",
-                           "queue")}
+    keys = ("received", "published", "failed", "reconnects", "queue")
+    out = {"t": [], **{k: [] for k in keys}}
 
     def gap_point(at: datetime) -> None:
         out["t"].append(int(at.timestamp()))
-        for k in ("received", "published", "failed", "reconnects", "queue"):
+        for k in keys:
             out[k].append(None)
 
     prev = None
@@ -166,25 +197,48 @@ def series(rows) -> dict:
         out["reconnects"].append(rate("rabbitmq_reconnects", 60))
         out["queue"].append(row["queue_size"])
         prev = row
+    if prev is not None and end - _ts(prev) > _gap(prev):
+        # Silent since: leave the rest of the window empty.
+        gap_point(_ts(prev) + timedelta(seconds=prev["interval_seconds"]))
+    if not out["t"] or out["t"][0] > start.timestamp():
+        gap_point(start)
+        for k in out:
+            out[k].insert(0, out[k].pop())
+    if out["t"][-1] < int(end.timestamp()):
+        gap_point(end)
     return out
 
 
-def sparklines(conn, now: datetime, hours: int) -> dict[str, list[Optional[float]]]:
-    """Packets/s per SPARK_BUCKET over the last ``hours`` (None = no data),
-    keyed by client_id. Bucketed in SQL: the dashboard draws every shoveler."""
-    width = int(SPARK_BUCKET.total_seconds())
-    n = math.ceil(timedelta(hours=hours) / SPARK_BUCKET)
-    since = db.to_iso(now - n * SPARK_BUCKET)
-    sums: dict[str, tuple[list[int], list[float]]] = {}
-    for b in db.report_buckets(conn, since, width, MISSED_REPORTS):
-        if 0 <= b["bucket"] < n:
-            packets, seconds = sums.setdefault(b["client_id"], ([0] * n, [0.0] * n))
-            packets[b["bucket"]] += b["packets"]
-            seconds[b["bucket"]] += b["seconds"]
-    return {
-        cid: [round(p / s, 2) if s else None for p, s in zip(packets, seconds)]
-        for cid, (packets, seconds) in sums.items()
-    }
+def hourly(rows, now: datetime, hours: int) -> list[dict]:
+    """Per-hour figures (newest first): the charts as a table."""
+    start = now - timedelta(hours=hours)
+    out = [{"start": start + timedelta(hours=h), "reports": 0, "packets": 0,
+            "published": 0, "seconds": 0.0, "failed": 0, "reconnects": 0,
+            "queue": None} for h in range(hours)]
+    for k, row in enumerate(rows):
+        h = int((_ts(row) - start) / timedelta(hours=1))
+        if not 0 <= h < hours:
+            continue
+        cell = out[h]
+        cell["reports"] += 1
+        if row["queue_size"] is not None:
+            cell["queue"] = max(cell["queue"] or 0, row["queue_size"])
+        prev = rows[k - 1] if k else None
+        if prev is None or _ts(row) - _ts(prev) > _gap(prev):
+            continue
+        d = _delta(prev, row, "packets_received")
+        if d is not None:
+            cell["packets"] += d
+            cell["seconds"] += (_ts(row) - _ts(prev)).total_seconds()
+        for key, name in (("published", "messages_published"),
+                          ("failed", "validations_failed"),
+                          ("reconnects", "rabbitmq_reconnects")):
+            cell[key] += _delta(prev, row, name) or 0
+    for cell in out:
+        s = cell.pop("seconds")
+        cell["received_rate"] = cell["packets"] / s if s else None
+        cell["published_rate"] = cell["published"] / s if s else None
+    return out[::-1]
 
 
 def totals(rows) -> dict[str, int]:
@@ -198,76 +252,10 @@ def totals(rows) -> dict[str, int]:
     return sums
 
 
-def restarts(rows) -> int:
-    return sum(1 for a, b in zip(rows, rows[1:]) if a["started_at"] != b["started_at"])
-
-
-@dataclass(frozen=True)
-class Health:
-    status: str  # healthy | no-packets | not-publishing | not-reporting | no-reports
-    label: str
-    detail: str
-
-
-def ago(delta: timedelta) -> str:
-    """'45 s', '12 min', '3 h', '2 d'."""
-    s = max(0, int(delta.total_seconds()))
-    if s < 90:
-        return f"{s} s"
-    if s < 90 * 60:
-        return f"{round(s / 60)} min"
-    if s < 36 * 3600:
-        return f"{round(s / 3600)} h"
-    return f"{round(s / 86400)} d"
-
-
-def assess(latest, recent, now: Optional[datetime] = None) -> Health:
-    """Health from a client's latest report and its reports over WINDOW.
-
-    ``recent`` is the client's reports from the last WINDOW (oldest first);
-    ``latest`` its newest report however old, or None if it never reported.
-    """
-    now = now or datetime.now(timezone.utc)
-    if latest is None:
-        return Health("no-reports", "No reports",
-                      "This shoveler has never reported. It may predate health "
-                      "reporting or not have registry.report_url set.")
-    age = now - _ts(latest)
-    if age > max(STALE_AFTER_MIN, _gap(latest)):
-        return Health("not-reporting", "Not reporting",
-                      f"Last report {ago(age)} ago.")
-
-    # Judge the running process over the window: from its first report in
-    # the window, or from its start (counters were 0) if it started since.
-    proc = [r for r in recent if r["started_at"] == latest["started_at"]]
-    started = db.parse_ts(latest["started_at"])
-    if started >= now - WINDOW:
-        base = {name: 0 for name in COUNTERS}
-        since = started
-    elif proc:
-        base, since = proc[0], _ts(proc[0])
-    else:
-        base, since = latest, _ts(latest)
-    if _ts(latest) - since >= EVIDENCE_MIN:
-        minutes = round((_ts(latest) - since).total_seconds() / 60)
-        received = _grew(base, latest, "packets_received")
-        published = _grew(base, latest, "messages_published")
-        if received == 0:
-            return Health("no-packets", "No packets",
-                          f"No packets received in the last {minutes} min. "
-                          "Check that XRootD sends its monitoring stream here.")
-        if received and published == 0:
-            return Health("not-publishing", "Not publishing",
-                          f"Received {received:,} packets in the last {minutes} min "
-                          "but published none to the message bus.")
-    return Health("healthy", "Healthy", f"Last report {ago(age)} ago.")
-
-
-def _grew(base, latest, name: str) -> Optional[int]:
-    a, b = base[name], latest[name]
-    if a is None or b is None or b < a:
-        return None
-    return b - a
+def restarts(rows) -> list[datetime]:
+    """When each process seen in ``rows`` after the first one started."""
+    return [db.parse_ts(b["started_at"])
+            for a, b in zip(rows, rows[1:]) if a["started_at"] != b["started_at"]]
 
 
 def current(rows) -> dict[str, Optional[float]]:
@@ -284,56 +272,210 @@ def current(rows) -> dict[str, Optional[float]]:
     return rates
 
 
+# --- Health ----------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Health:
+    status: str  # a key of LABELS other than no-data
+    summary: str  # what is wrong and since when
+    advice: str = ""  # what to check
+    since: Optional[datetime] = None  # when this state began, if known
+
+    @property
+    def label(self) -> str:
+        return LABELS[self.status]
+
+
+def _since(at: datetime, now: datetime, known: bool = True) -> str:
+    when = clock(at, now)
+    return f"{when} ({ago(now - at)} ago)" if known else f"before {when}"
+
+
+def _flat_since(rows, latest, name: str):
+    """When counter ``name`` last grew in ``latest``'s process.
+
+    Returns (time, the report it last grew by or None if never, known):
+    ``known`` is False when it was already flat at the oldest report we have.
+    """
+    proc = [r for r in rows if r["started_at"] == latest["started_at"]
+            and r[name] is not None and _ts(r) <= _ts(latest)]
+    for k in range(len(proc) - 1, 0, -1):
+        if proc[k - 1][name] < proc[k][name]:
+            return _ts(proc[k]), proc[k], True
+    if not latest[name]:
+        # Still 0: it never grew since the process started.
+        return db.parse_ts(latest["started_at"]), None, True
+    first = proc[0] if proc else latest
+    whole = bool(rows) and db.parse_ts(latest["started_at"]) >= _ts(rows[0])
+    return _ts(first), first, whole
+
+
+def assess(latest, rows, now: Optional[datetime] = None) -> Health:
+    """Health from a client's latest report and its recent reports.
+
+    ``rows`` are the client's reports, oldest first, covering at least WINDOW
+    (more lets the onset of a problem be dated further back); ``latest`` is
+    its newest report however old, or None if it never reported.
+    """
+    now = now or datetime.now(timezone.utc)
+    if latest is None:
+        return Health("no-reports", "Never reported.",
+                      "It may predate health reporting, or not have "
+                      "registry.report_url set.")
+    age = now - _ts(latest)
+    if age > max(STALE_AFTER_MIN, _gap(latest)):
+        return Health("not-reporting", f"No report since {_since(_ts(latest), now)}.",
+                      "Check that the shoveler is running and can reach this registry.",
+                      _ts(latest))
+
+    # Judge the running process over the window: from its first report in
+    # the window, or from its start (counters were 0) if it started since.
+    proc = [r for r in rows if r["started_at"] == latest["started_at"]
+            and _ts(r) >= now - WINDOW]
+    started = db.parse_ts(latest["started_at"])
+    if started >= now - WINDOW:
+        base = {name: 0 for name in COUNTERS}
+        since = started
+    elif proc:
+        base, since = proc[0], _ts(proc[0])
+    else:
+        base, since = latest, _ts(latest)
+    if _ts(latest) - since >= EVIDENCE_MIN:
+        received = _grew(base, latest, "packets_received")
+        published = _grew(base, latest, "messages_published")
+        if received == 0:
+            at, _, known = _flat_since(rows, latest, "packets_received")
+            return Health("no-packets",
+                          f"No packets received since {_since(at, now, known)}.",
+                          "Check that XRootD's monitoring stream is sent to this "
+                          "shoveler.", at)
+        if received and published == 0:
+            at, row, known = _flat_since(rows, latest, "messages_published")
+            got = latest["packets_received"] - (row["packets_received"] if row else 0)
+            return Health("not-publishing",
+                          f"Nothing published since {_since(at, now, known)}, "
+                          f"though {got:,} packets arrived.",
+                          "Check that the shoveler can reach RabbitMQ and that "
+                          "RabbitMQ accepts its token.", at)
+    return Health("healthy", f"Last report {ago(age)} ago.")
+
+
+def _grew(base, latest, name: str) -> Optional[int]:
+    a, b = base[name], latest[name]
+    if a is None or b is None or b < a:
+        return None
+    return b - a
+
+
+# --- The 24-hour tracker ---------------------------------------------------
+
 @dataclass(frozen=True)
 class Block:
-    state: str  # ok | warn | missing | none
+    state: str  # a key of LABELS
     start: datetime
     title: str
 
 
-def tracker(rows, now: datetime, hours: int) -> list[Block]:
-    """One block per SPARK_BUCKET over the last ``hours``, oldest first.
+@dataclass(frozen=True)
+class Run:
+    """Consecutive blocks in one state."""
+    state: str
+    start: datetime
+    end: datetime
+    blocks: int
 
-    ``ok``: reports with packets flowing and published; ``warn``: reports, but
-    no packets or none published; ``missing``: no report in the block since
-    the shoveler first reported; ``none``: before that.
+    @property
+    def label(self) -> str:
+        return LABELS[self.state]
+
+
+def trackers(conn, now: datetime, hours: int, latest: dict,
+             client_id: Optional[str] = None) -> dict[str, list[Block]]:
+    """Each client's blocks over the last ``hours``, oldest first.
+
+    ``latest`` maps client_id to its newest report (db.latest_reports), so a
+    shoveler that went quiet before the window still shows as not reporting.
+    The aggregation runs in SQL: the dashboard draws every shoveler.
     """
-    start = now - timedelta(hours=hours)
-    n = math.ceil(timedelta(hours=hours) / SPARK_BUCKET)
-    seen = [False] * n
-    received: list[Optional[int]] = [None] * n
-    published: list[Optional[int]] = [None] * n
+    n = math.ceil(timedelta(hours=hours) / BUCKET)
+    start = now - n * BUCKET
+    buckets: dict[str, dict[int, dict]] = {}
+    for b in db.report_buckets(conn, db.to_iso(start), int(BUCKET.total_seconds()),
+                               MISSED_REPORTS, client_id):
+        if 0 <= b["bucket"] < n:
+            buckets.setdefault(b["client_id"], {})[b["bucket"]] = b
+    ids = [client_id] if client_id else set(latest) | set(buckets)
+    return {cid: _blocks(buckets.get(cid, {}), latest.get(cid), start, n)
+            for cid in ids}
 
-    def index(at: datetime) -> int:
-        return int((at - start) / SPARK_BUCKET)
 
-    for row in rows:
-        if 0 <= index(_ts(row)) < n:
-            seen[index(_ts(row))] = True
-    for prev, cur in zip(rows, rows[1:]):
-        i = index(_ts(cur))
-        if not 0 <= i < n or _ts(cur) - _ts(prev) > _gap(prev):
-            continue
-        for sums, name in ((received, "packets_received"),
-                           (published, "messages_published")):
-            d = _delta(prev, cur, name)
-            if d is not None:
-                sums[i] = (sums[i] or 0) + d
-
-    first = index(_ts(rows[0])) if rows else n
+def _blocks(buckets: dict, latest, start: datetime, n: int) -> list[Block]:
+    # The last report seen so far, and its interval: seeded from before the
+    # window when the shoveler's latest report is older than it.
+    last = None
+    if latest is not None and _ts(latest) < start:
+        last = (_ts(latest), latest["interval_seconds"])
+    state = "no-data"
     blocks = []
     for i in range(n):
-        at = start + i * SPARK_BUCKET
-        when = f"{at:%H:%M}–{at + SPARK_BUCKET:%H:%M} UTC"
-        if not seen[i]:
-            state = "none" if i < first else "missing"
-            title = f"{when}: no reports"
-        elif received[i] == 0:
-            state, title = "warn", f"{when}: no packets received"
-        elif received[i] and published[i] == 0:
-            state, title = "warn", f"{when}: {received[i]:,} packets, none published"
+        at = start + i * BUCKET
+        end = at + BUCKET
+        when = f"{at:%H:%M}–{end:%H:%M} UTC"
+        b = buckets.get(i)
+        if b is None:
+            if last is None:
+                state, title = "no-data", f"{when}: no reports yet"
+            elif end - last[0] > timedelta(seconds=MISSED_REPORTS * last[1]):
+                state, title = "not-reporting", f"{when}: no reports"
+            else:
+                title = f"{when}: between reports"  # long interval: keep the state
         else:
-            state = "ok"
-            title = f"{when}: {received[i]:,} packets" if received[i] else f"{when}: reporting"
+            last = (db.parse_ts(b["latest"]), b["interval_seconds"])
+            packets, published = b["packets"], b["published"]
+            if packets == 0:
+                state, title = "no-packets", f"{when}: no packets received"
+            elif packets and published == 0:
+                state = "not-publishing"
+                title = f"{when}: {packets:,} packets received, none published"
+            else:
+                state = "healthy"
+                title = f"{when}: {packets:,} packets" if packets else f"{when}: reporting"
         blocks.append(Block(state, at, title))
     return blocks
+
+
+def runs(blocks: list[Block]) -> list[Run]:
+    """The tracker as runs of one state, oldest first."""
+    out: list[Run] = []
+    for b in blocks:
+        if out and out[-1].state == b.state:
+            last = out[-1]
+            out[-1] = Run(last.state, last.start, b.start + BUCKET, last.blocks + 1)
+        else:
+            out.append(Run(b.state, b.start, b.start + BUCKET, 1))
+    return out
+
+
+def pin_onset(runs: list[Run], health: Health) -> list[Run]:
+    """Start the newest run at the exact onset the reports give, when it is
+    the health state and the onset falls within a block of the run's start
+    (blocks only know 15-minute edges)."""
+    if not runs or health.since is None or runs[-1].state != health.status:
+        return runs
+    last = runs[-1]
+    if not last.start - BUCKET <= health.since <= last.start + BUCKET:
+        return runs
+    pinned = [Run(last.state, health.since, last.end, last.blocks)]
+    if len(runs) > 1:
+        prev = runs[-2]
+        pinned.insert(0, Run(prev.state, prev.start, health.since, prev.blocks))
+    return runs[:-2] + pinned if len(runs) > 1 else pinned
+
+
+def describe(runs: list[Run], now: datetime) -> str:
+    """The tracker in words, e.g. for a screen reader."""
+    parts = []
+    for i, r in enumerate(runs):
+        end = "now" if i == len(runs) - 1 else clock(r.end, now)
+        parts.append(f"{r.label} from {clock(r.start, now)} to {end}")
+    return "; ".join(parts) + "."

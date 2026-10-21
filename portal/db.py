@@ -433,35 +433,46 @@ def list_reports(
 
 
 def report_buckets(
-    conn: sqlite3.Connection, since: str, width_seconds: int, max_missed: int
+    conn: sqlite3.Connection,
+    since: str,
+    width_seconds: int,
+    max_missed: int,
+    client_id: Optional[str] = None,
 ) -> list[sqlite3.Row]:
-    """Packets received per client and time bucket since ``since``.
+    """Each client's reports since ``since`` summed into time buckets.
 
-    Each report adds the packets counted since the previous one, and the time
-    between them, to its bucket (``bucket`` 0 starts at ``since``). Pairs
-    across a restart, a counter reset, or more than ``max_missed`` report
-    intervals are skipped, as in health.series.
+    Per client and ``bucket`` (0 starts at ``since``): how many reports
+    arrived, the latest and its interval, and the packets received and
+    messages published since each one's previous report. Steps across a
+    restart, a counter reset, or more than ``max_missed`` report intervals
+    count no packets (NULL when no step in the bucket counts).
     """
     cur = conn.execute(
         """WITH steps AS (
              SELECT client_id, received_at, interval_seconds,
                     packets_received - LAG(packets_received) OVER w AS packets,
-                    (julianday(received_at) - julianday(LAG(received_at) OVER w))
-                        * 86400 AS seconds,
-                    started_at = LAG(started_at) OVER w AS same_process,
-                    LAG(interval_seconds) OVER w AS prev_interval
+                    messages_published - LAG(messages_published) OVER w AS published,
+                    started_at = LAG(started_at) OVER w
+                      AND (julianday(received_at) - julianday(LAG(received_at) OVER w))
+                          * 86400 <= :max_missed * LAG(interval_seconds) OVER w AS valid
              FROM client_reports
              WHERE received_at >= :since
+               AND (:client_id IS NULL OR client_id = :client_id)
              WINDOW w AS (PARTITION BY client_id ORDER BY received_at))
            SELECT client_id,
-                  CAST((julianday(received_at) - julianday(:since)) * 86400
-                       / :width AS INTEGER) AS bucket,
-                  SUM(packets) AS packets, SUM(seconds) AS seconds
+                  -- Whole seconds first: julianday's float error would put a
+                  -- report exactly on a bucket edge into the bucket before.
+                  CAST(ROUND((julianday(received_at) - julianday(:since)) * 86400)
+                       AS INTEGER) / :width AS bucket,
+                  COUNT(*) AS reports,
+                  MAX(received_at) AS latest,
+                  MAX(interval_seconds) AS interval_seconds,
+                  SUM(CASE WHEN valid AND packets >= 0 THEN packets END) AS packets,
+                  SUM(CASE WHEN valid AND published >= 0 THEN published END) AS published
            FROM steps
-           WHERE same_process AND packets >= 0 AND seconds > 0
-             AND seconds <= :max_missed * prev_interval
            GROUP BY client_id, bucket""",
-        {"since": since, "width": width_seconds, "max_missed": max_missed},
+        {"since": since, "width": width_seconds, "max_missed": max_missed,
+         "client_id": client_id},
     )
     return cur.fetchall()
 

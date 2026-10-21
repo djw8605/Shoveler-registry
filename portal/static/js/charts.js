@@ -1,79 +1,88 @@
-// Draws the health charts with uPlot (vendored by `npm run build:js`):
-// sparklines in [data-spark] cells on the dashboard, and the [data-chart]
-// panels on a shoveler page from the #series JSON (health.series).
+// Draws a shoveler page's charts with uPlot (vendored by `npm run build:js`)
+// from the #series JSON (health.series), one per [data-chart] element.
+// Times are UTC, like the rest of the page; the charts share one cursor, and
+// dragging across one zooms it (double-click resets).
 (function () {
   "use strict";
-  if (!window.uPlot) return;
+  var source = document.getElementById("series");
+  if (!window.uPlot || !source) return;
+  var data = JSON.parse(source.textContent);
 
-  // Tailwind palette, so the charts match the badges and tracker.
+  // Tailwind palette. Red and amber mean a health status elsewhere on the
+  // page, so only bus reconnects borrow amber; nothing here is red.
   var C = {
-    indigo: "#4f46e5", indigoFill: "rgba(79, 70, 229, 0.10)",
-    green: "#16a34a", red: "#dc2626", amber: "#d97706",
-    slate: "#475569", slateFill: "rgba(71, 85, 105, 0.10)",
+    indigo: "#4f46e5",
+    green: "#16a34a", greenFill: "rgba(22, 163, 74, 0.14)",
+    slate: "#475569", slateFill: "rgba(71, 85, 105, 0.12)",
+    muted: "#64748b", amber: "#d97706",
     grid: "#e2e8f0", text: "#64748b",
   };
   var FONT = '11px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif';
 
-  function fromZero(u, min, max) {
-    return [0, max > 0 ? max * 1.1 : 1];
-  }
+  var CHARTS = {
+    // Published is the filled area and received the line over it, so the
+    // two separate visibly when the shoveler stops publishing.
+    throughput: { floor: 1, series: [
+      { key: "published", label: "Published", stroke: C.green, fill: C.greenFill },
+      { key: "received", label: "Received", stroke: C.indigo },
+    ] },
+    // Up to 100 queued messages sit in memory as a matter of course.
+    queue: { floor: 100, series: [
+      { key: "queue", label: "Queued messages", stroke: C.slate, fill: C.slateFill },
+    ] },
+    errors: { floor: 1, series: [
+      { key: "failed", label: "Failed validation", stroke: C.muted },
+      { key: "reconnects", label: "Bus reconnects", stroke: C.amber },
+    ] },
+  };
+
+  var utc = function (ts) { return uPlot.tzDate(new Date(ts * 1e3), "Etc/UTC"); };
+  var hhmm = uPlot.fmtDate("{HH}:{mm}");
+  var day = uPlot.fmtDate("{YYYY}-{MM}-{DD}");
+  var stamp = uPlot.fmtDate("{YYYY}-{MM}-{DD} {HH}:{mm} UTC");
 
   function compact(v) {
-    if (v == null) return "—";
     var a = Math.abs(v);
     if (a >= 1e6) return +(v / 1e6).toFixed(1) + "M";
     if (a >= 1e3) return +(v / 1e3).toFixed(1) + "k";
-    return a >= 10 || v === 0 ? Math.round(v).toLocaleString() : +v.toFixed(2) + "";
+    return a >= 10 || v === 0 ? String(Math.round(v)) : String(+v.toFixed(2));
   }
 
-  function sparkline(el) {
-    var ys = JSON.parse(el.dataset.spark);
-    var xs = ys.map(function (_, i) { return i; });
-    new uPlot({
-      width: el.clientWidth, height: el.clientHeight,
-      pxAlign: false,
-      cursor: { show: false }, select: { show: false }, legend: { show: false },
-      scales: { x: { time: false }, y: { range: fromZero } },
-      axes: [{ show: false }, { show: false }],
-      series: [{}, { stroke: C.indigo, fill: C.indigoFill, width: 1.25 }],
-    }, [xs, ys], el);
+  // The legend names the series; values appear only while hovering.
+  function hovered(fmt) {
+    return function (u, v, s, idx) { return idx == null || v == null ? "" : fmt(v); };
   }
 
-  var CHARTS = {
-    throughput: [
-      { key: "received", label: "Received", stroke: C.indigo, fill: C.indigoFill },
-      { key: "published", label: "Published", stroke: C.green },
-    ],
-    queue: [
-      { key: "queue", label: "Queued messages", stroke: C.slate, fill: C.slateFill },
-    ],
-    errors: [
-      { key: "failed", label: "Failed validation", stroke: C.red },
-      { key: "reconnects", label: "Bus reconnects", stroke: C.amber },
-    ],
-  };
-
-  function chart(el, data) {
-    var defs = CHARTS[el.dataset.chart];
+  function chart(el) {
+    var def = CHARTS[el.dataset.chart];
     var axis = { stroke: C.text, font: FONT, grid: { stroke: C.grid, width: 1 },
                  ticks: { stroke: C.grid, width: 1 } };
     var u = new uPlot({
       width: el.clientWidth, height: el.clientHeight,
-      // The page shows times in UTC; so do the charts.
-      tzDate: function (ts) { return uPlot.tzDate(new Date(ts * 1e3), "Etc/UTC"); },
-      cursor: { drag: { x: false, y: false } },
-      scales: { y: { range: fromZero } },
-      axes: [axis, Object.assign({}, axis, {
-        size: 48, values: function (u, vals) { return vals.map(compact); },
-      })],
-      series: [{ label: "UTC", value: "{YYYY}-{MM}-{DD} {HH}:{mm}" }].concat(
-        defs.map(function (d) {
+      tzDate: utc,
+      cursor: { sync: { key: "shoveler" }, drag: { x: true, y: false } },
+      scales: { y: { range: function (u, min, max) {
+        // From zero, and small values don't fill the whole height.
+        return [0, Math.max(max * 1.1, def.floor)];
+      } } },
+      axes: [
+        Object.assign({}, axis, { values: function (u, splits) {
+          return splits.map(function (ts) {
+            var d = utc(ts);
+            return d.getHours() === 0 && d.getMinutes() === 0 ? day(d) : hhmm(d);
+          });
+        } }),
+        Object.assign({}, axis, { size: 48, values: function (u, vals) {
+          return vals.map(compact);
+        } }),
+      ],
+      series: [{ value: hovered(function (ts) { return stamp(utc(ts)); }) }]
+        .concat(def.series.map(function (d) {
           return { label: d.label, stroke: d.stroke, fill: d.fill, width: 1.5,
-                   value: function (u, v) { return compact(v); } };
-        })
-      ),
-    }, [data.t].concat(defs.map(function (d) { return data[d.key]; })), el);
-    // The legend sits below the plot; keep the whole chart in its box.
+                   value: hovered(compact) };
+        })),
+    }, [data.t].concat(def.series.map(function (d) { return data[d.key]; })), el);
+    // Keep plot + legend inside the element's fixed height.
     var legend = el.querySelector(".u-legend");
     var fit = function () {
       u.setSize({ width: el.clientWidth,
@@ -83,10 +92,5 @@
     new ResizeObserver(fit).observe(el);
   }
 
-  document.querySelectorAll("[data-spark]").forEach(sparkline);
-  var series = document.getElementById("series");
-  if (series) {
-    var data = JSON.parse(series.textContent);
-    document.querySelectorAll("[data-chart]").forEach(function (el) { chart(el, data); });
-  }
+  document.querySelectorAll("[data-chart]").forEach(chart);
 })();
