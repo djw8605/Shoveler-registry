@@ -300,6 +300,17 @@ def test_pending_client_gets_authorization_pending(client, settings):
     assert _post(client, make_assertion(key, "shoveler-pend1", _aud(settings))).status_code == 200
 
 
+def test_rejected_client_is_invalid_client(client, settings):
+    # Even with its own key: a rejected registration is just refused.
+    key = seed_pending(settings, "shoveler-pend1", key=new_key())
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.reject_pending_client(conn, "shoveler-pend1")
+    finally:
+        conn.close()
+    _assert_invalid_client(_post(client, make_assertion(key, "shoveler-pend1", _aud(settings))))
+
+
 def test_pending_status_needs_a_valid_assertion(client, settings):
     # Without the private key you learn nothing: same invalid_client as always.
     key = seed_pending(settings, "shoveler-pend1", key=new_key())

@@ -1,17 +1,19 @@
 """Idle-expiry job: disable credentials unused for IDLE_DAYS, delete
 pending (token-less) registrations nobody approved within
-PENDING_CLIENT_TTL_SECONDS, and drop health reports older than
-METRICS_RETENTION_HOURS (keeping each shoveler's latest).
+PENDING_CLIENT_TTL_SECONDS (rejected ones stay until an admin deletes them),
+and drop health reports older than METRICS_RETENTION_HOURS (keeping each
+shoveler's latest).
 
 Run from cron or a Kubernetes CronJob:
 
     python -m portal.expire
 
 The reference time is ``last_used_at`` (or ``created_at`` if a credential was
-never used). Only currently-enabled, approved rows are affected. Rows are never deleted
-(audit + recovery); recovery is self-service via the dashboard's Re-enable
-button, which clears the disabled flag. The shoveler keeps its key and
-client_id, so nothing needs to change on the shoveler side.
+never used). Only currently-enabled, approved rows are affected. This job
+never deletes them (audit + recovery; only an admin can); recovery is
+self-service via the dashboard's Re-enable button, which clears the disabled
+flag. The shoveler keeps its key and client_id, so nothing needs to change on
+the shoveler side.
 """
 
 from __future__ import annotations

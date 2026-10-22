@@ -1,4 +1,4 @@
-"""The admin dashboard: approve/reject, disable/re-enable, registration tokens."""
+"""The admin dashboard: approve/reject/delete, disable/re-enable/delete, registration tokens."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from datetime import datetime, timedelta, timezone
 import portal.main as main_mod
 from helpers import (
     kid_for,
+    new_key,
+    registration_body,
     seed_client,
     seed_pending,
     seed_report,
@@ -97,12 +99,79 @@ def test_approve_twice_is_harmless(client, settings, monkeypatch):
     assert _client(settings, "shoveler-pend1")["site"] == "nebraska"
 
 
-def test_reject_deletes_pending(client, settings, monkeypatch):
-    seed_pending(settings, "shoveler-pend1")
+def test_reject_keeps_the_key_refused(client, settings, monkeypatch):
+    key = seed_pending(settings, "shoveler-pend1")
     _as_admin(monkeypatch)
-    resp = client.post("/pending/shoveler-pend1/reject", data={"csrf_token": _csrf(client)})
+    csrf = _csrf(client)
+    resp = client.post("/pending/shoveler-pend1/reject", data={"csrf_token": csrf})
     assert "Rejected shoveler-pend1." in resp.text
+    assert "Awaiting approval" not in resp.text and "Rejected (1)" in resp.text
+    assert "/pending/shoveler-pend1/delete" in resp.text
+    row = _client(settings, "shoveler-pend1")
+    assert (row["pending"], row["disabled"], row["disabled_reason"]) == (1, 1, "rejected")
+
+    # Registering again with the same key gets the rejected client back, not
+    # a new pending one, and it can't be approved or rejected again.
+    again = client.post("/register", json=registration_body(key))
+    assert again.json()["client_id"] == "shoveler-pend1"
+    assert "Awaiting approval" not in client.get("/dashboard").text
+    resp = client.post("/pending/shoveler-pend1/approve", data={"site": "nebraska", "csrf_token": csrf})
+    assert "That shoveler is no longer pending." in resp.text
+    resp = client.post("/pending/shoveler-pend1/reject", data={"csrf_token": csrf})
+    assert "That shoveler is no longer pending." in resp.text
+    assert _client(settings, "shoveler-pend1")["site"] is None
+
+
+def test_delete_pending_or_rejected_registration(client, settings, monkeypatch):
+    seed_pending(settings, "shoveler-pend1")
+    key = seed_pending(settings, "shoveler-pend2", key=new_key())
+    _as_admin(monkeypatch)
+    csrf = _csrf(client)
+    resp = client.post("/pending/shoveler-pend1/delete", data={"csrf_token": csrf})
+    assert "Deleted the registration of shoveler-pend1." in resp.text
     assert _client(settings, "shoveler-pend1") is None
+
+    client.post("/pending/shoveler-pend2/reject", data={"csrf_token": csrf})
+    resp = client.post("/pending/shoveler-pend2/delete", data={"csrf_token": csrf})
+    assert "Deleted the registration of shoveler-pend2." in resp.text
+    assert _client(settings, "shoveler-pend2") is None
+    assert "Rejected (" not in resp.text
+    # Forgotten: the same key registers afresh and waits for approval again.
+    new_id = client.post("/register", json=registration_body(key)).json()["client_id"]
+    assert new_id != "shoveler-pend2" and _client(settings, new_id)["disabled"] == 0
+    assert "Awaiting approval (1)" in client.get("/dashboard").text
+
+    resp = client.post("/pending/shoveler-pend1/delete", data={"csrf_token": csrf})
+    assert "That shoveler is no longer pending." in resp.text
+
+
+def test_only_a_disabled_shoveler_can_be_deleted(client, settings, monkeypatch):
+    seed_client(settings, "shoveler-neb1")
+    now = datetime.now(timezone.utc)
+    seed_report(settings, "shoveler-neb1", now, started_at=now - timedelta(hours=1))
+    _as_admin(monkeypatch)
+    csrf = _csrf(client)
+    assert "/credentials/shoveler-neb1/delete" not in client.get("/dashboard").text
+    resp = client.post("/credentials/shoveler-neb1/delete", data={"csrf_token": csrf})
+    assert "Only a disabled shoveler can be deleted." in resp.text
+    assert _client(settings, "shoveler-neb1") is not None
+    # Nor a pending registration, through this route.
+    seed_pending(settings, "shoveler-pend1", key=new_key())
+    client.post("/credentials/shoveler-pend1/delete", data={"csrf_token": csrf})
+    assert _client(settings, "shoveler-pend1") is not None
+
+    client.post("/credentials/shoveler-neb1/disable", data={"csrf_token": csrf})
+    page = client.get("/shovelers/shoveler-neb1").text
+    assert "/credentials/shoveler-neb1/delete" in page
+    resp = client.post("/credentials/shoveler-neb1/delete", data={"csrf_token": csrf})
+    assert resp.url.path == "/dashboard"
+    assert "Shoveler shoveler-neb1 deleted." in resp.text
+    assert _client(settings, "shoveler-neb1") is None
+    conn = db.connect(settings.db_path)
+    try:
+        assert db.latest_report(conn, "shoveler-neb1") is None
+    finally:
+        conn.close()
 
 
 def test_disable_and_reenable_any_shoveler(client, settings, monkeypatch):
@@ -172,8 +241,10 @@ def test_posts_require_csrf(client, settings, monkeypatch):
     for path, form in [
         ("/pending/shoveler-pend1/approve", {"site": "nebraska"}),
         ("/pending/shoveler-pend1/reject", {}),
+        ("/pending/shoveler-pend1/delete", {}),
         ("/registration-tokens", {"site": "nebraska"}),
         ("/credentials/shoveler-neb1/disable", {}),
+        ("/credentials/shoveler-neb1/delete", {}),
     ]:
         resp = client.post(path, data=dict(form, csrf_token="bad"))
         assert "Invalid CSRF token." in resp.text, path

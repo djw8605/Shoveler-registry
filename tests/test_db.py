@@ -132,9 +132,12 @@ def test_pending_client_lifecycle(settings):
         assert db.approve_client(conn, "shoveler-p1", site="nebraska", owner_sub="alice", owner_email="a@x")
         row = db.get_client(conn, "shoveler-p1")
         assert (row["pending"], row["site"], row["owner_sub"]) == (0, "nebraska", "alice")
-        # Approving twice, or rejecting an approved client, does nothing.
+        # Approving twice, or rejecting or deleting an approved client as a
+        # registration, does nothing; nor does deleting it while enabled.
         assert not db.approve_client(conn, "shoveler-p1", site="wisconsin", owner_sub="bob", owner_email=None)
+        assert not db.reject_pending_client(conn, "shoveler-p1")
         assert not db.delete_pending_client(conn, "shoveler-p1")
+        assert not db.delete_disabled_client(conn, "shoveler-p1")
         assert db.get_client(conn, "shoveler-p1")["site"] == "nebraska"
         assert db.list_known_sites(conn) == ["nebraska"]
     finally:
@@ -145,14 +148,27 @@ def test_reject_and_purge_pending(settings):
     db.init_db(settings.db_path)
     conn = db.connect(settings.db_path)
     try:
-        _pending(conn, "shoveler-rej")
-        assert db.delete_pending_client(conn, "shoveler-rej")
-        assert db.get_client(conn, "shoveler-rej") is None
+        _pending(conn, "shoveler-del")
+        assert db.delete_pending_client(conn, "shoveler-del")
+        assert db.get_client(conn, "shoveler-del") is None
 
+        # A rejection is kept, out of the queue, its cap and the stale purge,
+        # and can't be approved; deleting it forgets it.
         old = db.to_iso(datetime.now(timezone.utc) - timedelta(days=10))
+        _pending(conn, "shoveler-rej", created_at=old)
+        assert db.reject_pending_client(conn, "shoveler-rej")
+        assert not db.reject_pending_client(conn, "shoveler-rej")
+        assert db.list_pending_clients(conn) == [] and db.count_pending_clients(conn) == 0
+        assert [r["client_id"] for r in db.list_rejected_clients(conn)] == ["shoveler-rej"]
+        assert not db.approve_client(conn, "shoveler-rej", site="x", owner_sub="a", owner_email=None)
+        cutoff = db.to_iso(datetime.now(timezone.utc) - timedelta(days=7))
+        assert db.delete_stale_pending_clients(conn, cutoff) == []
+        assert not db.delete_disabled_client(conn, "shoveler-rej")
+        assert db.delete_pending_client(conn, "shoveler-rej")
+        assert db.list_rejected_clients(conn) == []
+
         _pending(conn, "shoveler-old", created_at=old)
         _pending(conn, "shoveler-new")
-        cutoff = db.to_iso(datetime.now(timezone.utc) - timedelta(days=7))
         assert db.delete_stale_pending_clients(conn, cutoff) == ["shoveler-old"]
         assert [r["client_id"] for r in db.list_pending_clients(conn)] == ["shoveler-new"]
     finally:

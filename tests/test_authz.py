@@ -88,10 +88,12 @@ def _state(settings):
     [
         ("/pending/shoveler-pend1/approve", {"site": "nebraska"}),
         ("/pending/shoveler-pend1/reject", {}),
+        ("/pending/shoveler-pend1/delete", {}),
         ("/registration-tokens", {"site": "nebraska"}),
         ("/registration-tokens/{token_hash}/revoke", {}),
         ("/credentials/shoveler-neb1/disable", {}),
         ("/credentials/shoveler-off/enable", {}),
+        ("/credentials/shoveler-off/delete", {}),
     ],
 )
 def test_non_admin_cannot_change_anything(client, settings, monkeypatch, path, form):
