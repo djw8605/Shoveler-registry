@@ -1,6 +1,6 @@
 {
   "name": "shoveler-auth-portal-css",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": true,
   "description": "Build-time CSS and chart toolchain for the portal (not shipped in the runtime image).",
   "scripts": {

@@ -23,7 +23,7 @@ resources:
 
 images:
   - name: ghcr.io/djw8605/shoveler-auth-portal
-    newTag: "0.2.1" # a released tag (git tag v0.2.1 publishes :0.2.1)
+    newTag: "0.2.2" # a released tag (git tag v0.2.2 publishes :0.2.2)
 
 # Non-secret settings, visible in git. A change here rolls the Deployment
 # (kustomize adds a content hash to the ConfigMap name).
