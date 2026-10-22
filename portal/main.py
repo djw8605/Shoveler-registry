@@ -208,6 +208,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         conn = db.connect(settings.db_path)
         try:
             pending = [_pending_view(r) for r in db.list_pending_clients(conn)]
+            rejected = [_pending_view(r) for r in db.list_rejected_clients(conn)]
             reg_tokens = [_token_view(r) for r in db.list_registration_tokens(conn)]
             client_rows = db.list_all_clients(conn)
             known_sites = db.list_known_sites(conn)
@@ -241,6 +242,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             request,
             "dashboard.html",
             pending=pending,
+            rejected=rejected,
             reg_tokens=reg_tokens,
             clients=[_client_view(r, settings.idle_days) for r in client_rows],
             known_sites=known_sites,
@@ -345,11 +347,29 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return RedirectResponse("/dashboard", status_code=303)
         conn = db.connect(settings.db_path)
         try:
-            ok = db.delete_pending_client(conn, client_id)
+            ok = db.reject_pending_client(conn, client_id)
         finally:
             conn.close()
         if ok:
             _flash(request.session, f"Rejected {client_id}.", "info")
+        else:
+            _flash(request.session, "That shoveler is no longer pending.", "error")
+        return RedirectResponse("/dashboard", status_code=303)
+
+    @app.post("/pending/{client_id}/delete")
+    def pending_delete(request: Request, client_id: str, csrf_token: str = Form(...)):
+        if not admin_user(request):
+            return refuse(request)
+        if not _check_csrf(request.session, csrf_token):
+            _flash(request.session, "Invalid CSRF token.", "error")
+            return RedirectResponse("/dashboard", status_code=303)
+        conn = db.connect(settings.db_path)
+        try:
+            ok = db.delete_pending_client(conn, client_id)
+        finally:
+            conn.close()
+        if ok:
+            _flash(request.session, f"Deleted the registration of {client_id}.", "info")
         else:
             _flash(request.session, "That shoveler is no longer pending.", "error")
         return RedirectResponse("/dashboard", status_code=303)
@@ -458,6 +478,25 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             conn.close()
         _flash(request.session, f"Shoveler {client_id} re-enabled.", "info")
         return RedirectResponse(_back(next, client_id), status_code=303)
+
+    @app.post("/credentials/{client_id}/delete")
+    def credentials_delete(request: Request, client_id: str, csrf_token: str = Form(...)):
+        if not admin_user(request):
+            return refuse(request)
+        if not _check_csrf(request.session, csrf_token):
+            _flash(request.session, "Invalid CSRF token.", "error")
+            return RedirectResponse("/dashboard", status_code=303)
+        conn = db.connect(settings.db_path)
+        try:
+            ok = db.delete_disabled_client(conn, client_id)
+        finally:
+            conn.close()
+        if ok:
+            _flash(request.session, f"Shoveler {client_id} deleted.", "info")
+        else:
+            _flash(request.session, "Only a disabled shoveler can be deleted.", "error")
+        # Its page is gone, so always back to the dashboard.
+        return RedirectResponse("/dashboard", status_code=303)
 
     # --- Machine-facing routes ------------------------------------------
 

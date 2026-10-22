@@ -100,6 +100,13 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
   only AFTER their assertion verifies, are kept out of the client list and
   idle-expiry, and are capped and purged. An admin approves one and types its
   site label; `owner_*` records that admin (or the token's creator).
+- **Reject vs delete.** Reject keeps the row as `pending = 1, disabled = 1,
+  disabled_reason = 'rejected'` (`db.REJECTED`), so a retry with the same key
+  gets it back from `/register` and `invalid_client` from `/token`; it is out
+  of the pending cap and never purged. Delete (`db.delete_pending_client`)
+  forgets a pending or rejected row, so the key may register again. Only a
+  DISABLED approved shoveler can be deleted (`db.delete_disabled_client`); its
+  reports go with it (`ON DELETE CASCADE`).
 - **Browser POSTs are CSRF-protected.** Every form includes the per-session
   `csrf_token`; handlers call `_check_csrf`. Destructive actions also confirm
   via a JS `confirm()` in the template. New POST routes must do the same.

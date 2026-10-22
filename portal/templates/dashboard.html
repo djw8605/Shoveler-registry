@@ -23,6 +23,41 @@
     {% endcall %}
   {% endif %}
 
+  {% if rejected %}
+    {% call ui.card(title="Rejected (" ~ rejected|length ~ ")") %}
+      <p class="mb-3 text-sm text-slate-600">
+        These keys stay refused, however often they register. Delete one to let it
+        register again and wait for approval.
+      </p>
+      <div class="relative overflow-x-auto">
+        <table class="min-w-full divide-y divide-slate-200 text-sm">
+          <thead>
+            <tr class="text-left text-xs font-medium uppercase tracking-wide text-slate-500">
+              <th class="py-2 pr-4">client_id</th>
+              <th class="py-2 pr-4">Name</th>
+              <th class="py-2 pr-4">Key</th>
+              <th class="py-2 pr-4">From</th>
+              <th class="py-2 pr-4">Registered</th>
+              <th class="py-2 pr-4"><span class="sr-only">Actions</span></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-slate-100">
+            {% for p in rejected %}
+              <tr>
+                <td class="py-3 pr-4 font-mono text-xs text-slate-900">{{ p.client_id }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ p.client_name or "—" }}</td>
+                <td class="py-3 pr-4 font-mono text-xs text-slate-500" title="RFC 7638 key thumbprint">{{ p.thumbprint }}…</td>
+                <td class="py-3 pr-4 font-mono text-xs text-slate-500">{{ p.registered_ip or "—" }}</td>
+                <td class="py-3 pr-4 text-slate-600">{{ p.created_at[:16] | replace("T", " ") }}</td>
+                <td class="py-3 pr-4"><div class="flex justify-end">{{ ui.delete_pending(p, csrf_token) }}</div></td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endcall %}
+  {% endif %}
+
   {% if fleet %}
     {% call ui.card(title="Health", aside="Updated " ~ updated) %}
       <ul class="mb-4 flex flex-wrap gap-x-5 gap-y-1 text-sm text-slate-600" aria-label="Summary">
@@ -118,7 +153,7 @@
                 <td class="py-3 pr-4 text-slate-600">{{ c.created_at[:10] }}</td>
                 <td class="py-3 pr-4 text-slate-600">{{ c.last_used_at[:16] | replace("T", " ") if c.last_used_at else "—" }}</td>
                 <td class="py-3 pr-4">
-                  <div class="flex justify-end">
+                  <div class="flex justify-end gap-2">
                     {% if c.status != "disabled" %}
                     <form method="post" action="/credentials/{{ c.client_id }}/disable"
                           onsubmit="return confirm('Disable {{ c.client_id }} ({{ c.site }})? The shoveler will stop getting tokens.');">
@@ -129,8 +164,9 @@
                     <form method="post" action="/credentials/{{ c.client_id }}/enable"
                           onsubmit="return confirm('Re-enable {{ c.client_id }}? The shoveler can get tokens again with its existing key.');">
                       <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-                      {{ ui.button("Re-enable", "submit", "secondary") }}
+                      {{ ui.button("Re-enable", "submit", "secondary", "whitespace-nowrap") }}
                     </form>
+                    {{ ui.delete_shoveler(c, csrf_token) }}
                     {% endif %}
                   </div>
                 </td>

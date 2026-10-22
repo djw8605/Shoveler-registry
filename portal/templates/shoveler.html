@@ -57,12 +57,15 @@
           {{ ui.button("Disable", "submit", "danger") }}
         </form>
       {% else %}
-        <form method="post" action="/credentials/{{ client.client_id }}/enable"
-              onsubmit="return confirm('Re-enable {{ client.client_id }}? The shoveler can get tokens again with its existing key.');">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
-          <input type="hidden" name="next" value="/shovelers/{{ client.client_id }}" />
-          {{ ui.button("Re-enable", "submit", "secondary") }}
-        </form>
+        <div class="flex gap-2">
+          <form method="post" action="/credentials/{{ client.client_id }}/enable"
+                onsubmit="return confirm('Re-enable {{ client.client_id }}? The shoveler can get tokens again with its existing key.');">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+            <input type="hidden" name="next" value="/shovelers/{{ client.client_id }}" />
+            {{ ui.button("Re-enable", "submit", "secondary") }}
+          </form>
+          {{ ui.delete_shoveler(client, csrf_token) }}
+        </div>
       {% endif %}
     </div>
     <p class="mt-1 text-sm text-slate-600">

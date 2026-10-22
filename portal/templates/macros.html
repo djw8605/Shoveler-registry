@@ -89,10 +89,11 @@
                   {{ button("Approve", "submit", "primary") }}
                 </form>
                 <form method="post" action="/pending/{{ p.client_id }}/reject"
-                      onsubmit="return confirm('Reject {{ p.client_id }}? Its registration is deleted; it would have to register again.');">
+                      onsubmit="return confirm('Reject {{ p.client_id }}? Its key stays refused, even if it registers again, until you delete it.');">
                   <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
                   {{ button("Reject", "submit", "danger") }}
                 </form>
+                {{ delete_pending(p, csrf_token) }}
               </div>
             </td>
           </tr>
@@ -100,6 +101,24 @@
       </tbody>
     </table>
   </div>
+{% endmacro %}
+
+{# Forget a pending or rejected registration; the shoveler may register again. #}
+{% macro delete_pending(p, csrf_token) %}
+  <form method="post" action="/pending/{{ p.client_id }}/delete"
+        onsubmit="return confirm('Delete the registration of {{ p.client_id }}? If the shoveler registers again it will be back awaiting approval.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    {{ button("Delete", "submit", "secondary") }}
+  </form>
+{% endmacro %}
+
+{# Delete a disabled shoveler and its health reports. #}
+{% macro delete_shoveler(c, csrf_token) %}
+  <form method="post" action="/credentials/{{ c.client_id }}/delete"
+        onsubmit="return confirm('Delete {{ c.client_id }} ({{ c.site }}) and its health reports? This cannot be undone; the shoveler would have to register again.');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}" />
+    {{ button("Delete", "submit", "danger") }}
+  </form>
 {% endmacro %}
 
 {# Shoveler health (health.Health): a coloured dot and its label. #}

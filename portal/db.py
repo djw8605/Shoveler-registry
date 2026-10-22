@@ -18,7 +18,8 @@ CREATE TABLE IF NOT EXISTS clients (
     client_id       TEXT PRIMARY KEY,
     -- site is a display label set by an admin; owner_* records the admin who
     -- approved it or minted its registration token. Both are NULL while a
-    -- token-less registration is pending.
+    -- token-less registration is pending. A rejected registration stays
+    -- pending, disabled with reason 'rejected', so its key can't come back.
     site            TEXT,
     owner_sub       TEXT,
     owner_email     TEXT,
@@ -199,13 +200,29 @@ def insert_pending_client(
     )
 
 
+# disabled_reason of a rejected registration.
+REJECTED = "rejected"
+
+
 def count_pending_clients(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT COUNT(*) FROM clients WHERE pending = 1").fetchone()[0]
+    """Registrations awaiting approval (not rejected ones)."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM clients WHERE pending = 1 AND disabled = 0"
+    ).fetchone()[0]
 
 
 def list_pending_clients(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     cur = conn.execute(
-        "SELECT * FROM clients WHERE pending = 1 ORDER BY created_at DESC"
+        "SELECT * FROM clients WHERE pending = 1 AND disabled = 0 "
+        "ORDER BY created_at DESC"
+    )
+    return cur.fetchall()
+
+
+def list_rejected_clients(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    cur = conn.execute(
+        "SELECT * FROM clients WHERE pending = 1 AND disabled = 1 "
+        "ORDER BY created_at DESC"
     )
     return cur.fetchall()
 
@@ -220,33 +237,58 @@ def approve_client(
 ) -> bool:
     """Approve a pending client, labelling its site and recording the approver.
 
-    Returns False if the client isn't pending (already approved or rejected).
+    Returns False if the client isn't awaiting approval (already approved,
+    rejected or deleted).
     """
     cur = conn.execute(
         """UPDATE clients SET pending = 0, site = ?, owner_sub = ?, owner_email = ?
-           WHERE client_id = ? AND pending = 1""",
+           WHERE client_id = ? AND pending = 1 AND disabled = 0""",
         (site, owner_sub, owner_email, client_id),
     )
     return cur.rowcount == 1
 
 
+def reject_pending_client(conn: sqlite3.Connection, client_id: str) -> bool:
+    """Reject a client awaiting approval. The row is kept, so a retry with the
+    same key gets the rejected client back instead of a new pending one."""
+    cur = conn.execute(
+        """UPDATE clients SET disabled = 1, disabled_reason = ?
+           WHERE client_id = ? AND pending = 1 AND disabled = 0""",
+        (REJECTED, client_id),
+    )
+    return cur.rowcount == 1
+
+
 def delete_pending_client(conn: sqlite3.Connection, client_id: str) -> bool:
-    """Reject a pending client. It never had access, so nothing is kept."""
+    """Forget a pending or rejected registration; its key may register again."""
     cur = conn.execute(
         "DELETE FROM clients WHERE client_id = ? AND pending = 1", (client_id,)
     )
     return cur.rowcount == 1
 
 
-def delete_stale_pending_clients(conn: sqlite3.Connection, before: str) -> list[str]:
-    """Delete pending clients registered before ``before``; returns their ids."""
+def delete_disabled_client(conn: sqlite3.Connection, client_id: str) -> bool:
+    """Delete an approved client an admin or the expire job disabled, with its
+    health reports. Only disabled ones, so nothing working is removed."""
     cur = conn.execute(
-        "SELECT client_id FROM clients WHERE pending = 1 AND created_at < ?",
+        "DELETE FROM clients WHERE client_id = ? AND pending = 0 AND disabled = 1",
+        (client_id,),
+    )
+    return cur.rowcount == 1
+
+
+def delete_stale_pending_clients(conn: sqlite3.Connection, before: str) -> list[str]:
+    """Delete clients awaiting approval since before ``before``; returns their
+    ids. Rejected ones are kept until an admin deletes them."""
+    cur = conn.execute(
+        "SELECT client_id FROM clients "
+        "WHERE pending = 1 AND disabled = 0 AND created_at < ?",
         (before,),
     )
     ids = [r["client_id"] for r in cur.fetchall()]
     conn.execute(
-        "DELETE FROM clients WHERE pending = 1 AND created_at < ?", (before,)
+        "DELETE FROM clients WHERE pending = 1 AND disabled = 0 AND created_at < ?",
+        (before,),
     )
     return ids
 

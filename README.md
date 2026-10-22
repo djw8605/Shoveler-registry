@@ -11,9 +11,10 @@ Python.
 It does five things:
 
 1. **Admin portal** (browser, CILogon login, members of one COmanage admin
-   group only) — admins **approve** or reject shovelers that registered
-   themselves, label each with its site, create one-time **registration
-   tokens**, and disable / re-enable shovelers. Site operators never log in.
+   group only) — admins **approve**, reject or delete shovelers that
+   registered themselves, label each with its site, create one-time
+   **registration tokens**, and disable / re-enable / delete shovelers. Site
+   operators never log in.
 2. **Registration endpoint** (`POST /register`) — a shoveler sends its **public
    key** (RFC 7591 request format) and waits as **pending** until an admin
    approves it. With an admin-made registration token it is active at once.
@@ -25,7 +26,8 @@ It does five things:
    packet counts and queue size with its access token; the dashboard shows
    which shovelers are healthy, with a day of charts per shoveler.
 5. **Expiry job** — disables shovelers unused for `IDLE_DAYS`, deletes
-   pending registrations nobody approved, and drops old health reports.
+   pending registrations nobody approved (rejected ones stay until an admin
+   deletes them), and drops old health reports.
 
 > **Two kinds of credentials — don't conflate them.**
 > The portal is itself a *confidential OIDC client of CILogon* (`CILOGON_CLIENT_ID`/
@@ -137,10 +139,17 @@ Admins see one dashboard with:
 
 - **Awaiting approval:** shovelers that registered without a token, with their
   `client_id`, name, key thumbprint, source IP and time. **Approve** asks for a
-  site label (known sites are suggested); **Reject** deletes the registration.
+  site label (known sites are suggested); **Reject** refuses it for good:
+  registering again with the same key gets the same rejected `client_id`
+  back, never a new pending one. **Delete** forgets the registration, so the
+  shoveler can register again and wait for approval.
+- **Rejected:** rejected registrations, each with **Delete** to forget it
+  (shown only when there are some).
 - **Registered shovelers:** every approved shoveler (site, `client_id`, name,
   key thumbprint, who approved it, status, created, last used), with
-  **Disable** (`disabled_reason='disabled-by-admin'`) and **Re-enable**.
+  **Disable** (`disabled_reason='disabled-by-admin'`) and **Re-enable**. A
+  disabled shoveler can also be **deleted**, with its health reports; it
+  would have to register again.
 - **Health:** every enabled shoveler's health from its reports, worst first.
   A row that isn't healthy says what is wrong and since when ("Nothing
   published since 02:32 UTC (46 min ago)"). Each row also shows the packet
@@ -160,7 +169,8 @@ Each approved shoveler also has a page, `/shovelers/<client_id>`:
 - uPlot charts of packets per second (received and published), queue size
   and errors per minute over the last 2 or 24 hours (drag to zoom), with the
   same figures as an hourly table;
-- its registration details, and Disable / Re-enable.
+- its registration details, and Disable / Re-enable (and Delete, once
+  disabled).
 
 All times are UTC. The page reloads every minute unless paused.
 
@@ -199,8 +209,9 @@ There are two ways:
 
 - **Without a token** (no `Authorization` header at all; the usual way): the
   client is **pending**, with no site. It can't get access tokens until an
-  admin approves it on the dashboard and labels its site. Rejecting it deletes
-  it.
+  admin approves it on the dashboard and labels its site. Rejecting it keeps
+  its key refused (`invalid_client` at `/token`, and the same rejected client
+  from `/register`) until an admin deletes the registration.
 - **With a registration token** an admin created (bearer token): the client is
   active immediately, labelled with the token's site.
 
@@ -415,7 +426,8 @@ The shoveler keeps its private key, `client_id` and access token in
 `/var/lib/xrootd-monitoring-shoveler/`, which its packages create for the
 service user. **That directory must survive restarts and redeploys** (e.g. a
 persistent volume for a containerised shoveler). If it is lost, the shoveler
-registers again as a new pending client; an admin can disable the old one.
+registers again as a new pending client; an admin can disable, then delete,
+the old one.
 
 ## Signing keys & rotation
 
@@ -456,13 +468,14 @@ python -m portal.expire
 ```
 
 Disables credentials whose reference time (`last_used_at`, or `created_at` if
-never used) is older than `IDLE_DAYS`, setting `disabled_reason='idle'`. Rows
-are never deleted (audit + recovery). To recover, an admin clicks
+never used) is older than `IDLE_DAYS`, setting `disabled_reason='idle'`. The
+job never deletes them (audit + recovery); only an admin can, once disabled. To recover, an admin clicks
 **Re-enable**, which clears the disabled flag; the shoveler keeps its key and
 `client_id` and picks it up on its next 60-second retry, so nothing changes on
 its side. (If a key may be compromised, disable that shoveler and have it
 register again with a new key instead.) The same job deletes pending
-registrations nobody approved within `PENDING_CLIENT_TTL_SECONDS`, and health
+registrations nobody approved within `PENDING_CLIENT_TTL_SECONDS` (rejected
+ones are kept until an admin deletes them), and health
 reports older than `METRICS_RETENTION_HOURS` (keeping each shoveler's latest).
 Deploy it via [`k8s/base/cronjob.yaml`](./k8s/base/cronjob.yaml) or cron.
 
