@@ -10,6 +10,7 @@ session login) is the real code path.
 
 from __future__ import annotations
 
+import logging
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -31,6 +32,7 @@ class FakeCILogon:
         self.key = helpers.new_key()
         self.requests: list[httpx2.Request] = []
         self.claims: dict = {"isMemberOf": [ADMIN]}
+        self.scope = "openid email profile org.cilogon.userinfo"
         self.userinfo: dict = {}
         self.userinfo_error: Exception | None = None
         self.nonce: str | None = None
@@ -75,6 +77,7 @@ class FakeCILogon:
                 "access_token": ACCESS_TOKEN,
                 "token_type": "Bearer",
                 "expires_in": 900,
+                "scope": self.scope,
                 "id_token": self.id_token(),
             })
         if path == "/oauth2/userinfo":
@@ -173,6 +176,44 @@ def test_userinfo_failure_means_no_groups(client, idp, caplog):
     assert finish_login(client, params["state"]).headers["location"] == "/dashboard"
     assert "admin@example.org" in client.get("/dashboard").text
     assert "userinfo group lookup failed" in caplog.text
+
+
+# What login logs: scope and claim NAMES, never values or tokens, so an admin
+# can see why a user arrived with no groups.
+
+def test_login_logs_scope_and_claim_names(client, idp, caplog):
+    caplog.set_level(logging.INFO, logger="portal.auth")
+    idp.claims = {"isMemberOf": ["CO:members:active", ADMIN]}
+    params = start_login(client, idp)
+    finish_login(client, params["state"])
+    text = caplog.text
+    assert "granted_scope='openid email profile org.cilogon.userinfo'" in text
+    assert "'isMemberOf'" in text and "groups=2 (from id_token)" in text
+    assert not idp.requests_to("/oauth2/userinfo")
+    assert "carol@example.org" not in text and ACCESS_TOKEN not in text
+
+
+def test_userinfo_fallback_is_logged(client, idp, caplog):
+    caplog.set_level(logging.INFO, logger="portal.auth")
+    idp.claims = {}
+    idp.userinfo = {"isMemberOf": [ADMIN]}
+    params = start_login(client, idp)
+    finish_login(client, params["state"])
+    assert "userinfo: claims=['isMemberOf', 'sub']" in caplog.text
+    assert "groups=1 (from userinfo)" in caplog.text
+
+
+def test_no_groups_anywhere_is_logged(client, idp, caplog):
+    caplog.set_level(logging.INFO, logger="portal.auth")
+    idp.claims = {}
+    idp.scope = "openid email profile"
+    idp.userinfo = {"email": "carol@example.org"}
+    params = start_login(client, idp)
+    finish_login(client, params["state"])
+    assert "granted_scope='openid email profile'" in caplog.text
+    assert "userinfo: claims=['email', 'sub']" in caplog.text
+    assert "groups=0 (from userinfo)" in caplog.text
+    assert "carol@example.org" not in caplog.text
 
 
 def test_state_mismatch_is_rejected(client, idp):
