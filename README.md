@@ -533,7 +533,7 @@ Prerequisites:
   portal's CILogon client in the `isMemberOf` claim (see Authorization above).
 - The `shoveler-auth-oidc-secret` and `shoveler-auth-signing-key` Secrets in
   the namespace (above).
-- A published image tag (see Docker above); the overlay pins `:0.2.0`.
+- A published image tag (see Docker above); the overlay pins `:0.2.1`.
 
 Configure the overlay (tiger shown):
 
@@ -552,7 +552,7 @@ Then deploy it one of two ways:
   synced by Flux from tiger-osg-config: `osgdev` from `manifests/development`,
   `osg` from `manifests/production`. Copy the overlay to
   `manifests/development/shoveler-auth-portal/` there, point its base at this
-  repo (`resources: [https://github.com/djw8605/Shoveler-registry//k8s/base?ref=v0.2.0]`),
+  repo (`resources: [https://github.com/djw8605/Shoveler-registry//k8s/base?ref=v0.2.1]`),
   and add `shoveler-auth-portal` to `manifests/development/kustomization.yaml`.
   If Flux refuses remote bases, copy `k8s/base` alongside instead. Moving to
   production later means `namespace: osg`, an `*.osg.chtc.io` (or
