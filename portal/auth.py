@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import secrets
 from dataclasses import dataclass
 from typing import Optional
@@ -21,6 +22,8 @@ import httpx
 import jwt
 
 from .config import Settings
+
+log = logging.getLogger("portal.auth")
 
 
 @dataclass
@@ -131,13 +134,25 @@ class OIDCClient:
         if claims.get("nonce") != expected_nonce:
             raise OIDCError("nonce mismatch")
 
+        # Which scopes CILogon granted and which claims it sent, by NAME only
+        # (never values or tokens): enough to see why groups are missing.
+        log.info(
+            "login sub=%s granted_scope=%r id_token_claims=%s",
+            claims["sub"],
+            payload.get("scope"),
+            sorted(claims),
+        )
+
         # COmanage group memberships arrive in the ``isMemberOf`` claim (released
         # by the ``org.cilogon.userinfo`` scope). Some CILogon deployments put it
         # in the ID token; others only at the userinfo endpoint, so fall back to
         # userinfo using the access token when the ID token doesn't carry it.
         groups = _normalize_groups(claims.get("isMemberOf"))
+        source = "id_token"
         if not groups and payload.get("access_token"):
             groups = self._fetch_groups(meta, payload["access_token"])
+            source = "userinfo"
+        log.info("login sub=%s groups=%d (from %s)", claims["sub"], len(groups), source)
 
         return UserInfo(
             sub=claims["sub"],
@@ -149,6 +164,7 @@ class OIDCClient:
     def _fetch_groups(self, meta: dict, access_token: str) -> tuple[str, ...]:
         endpoint = meta.get("userinfo_endpoint")
         if not endpoint:
+            log.warning("userinfo: no userinfo_endpoint in CILogon metadata")
             return ()
         try:
             resp = httpx.get(
@@ -157,11 +173,15 @@ class OIDCClient:
                 timeout=10,
             )
             resp.raise_for_status()
-            return _normalize_groups(resp.json().get("isMemberOf"))
-        except (httpx.HTTPError, ValueError):
-            # Group info is best-effort; an unreachable userinfo endpoint just
-            # means the user sees no sites until it recovers.
+            info = resp.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            # Group info is best-effort, but say why it's missing.
+            log.warning("userinfo: request failed: %s", exc)
             return ()
+        log.info("userinfo: claims=%s", sorted(info) if isinstance(info, dict) else type(info).__name__)
+        if not isinstance(info, dict):
+            return ()
+        return _normalize_groups(info.get("isMemberOf"))
 
 
 # --- Session helpers -----------------------------------------------------

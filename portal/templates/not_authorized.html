@@ -12,6 +12,19 @@
         a shoveler: start it and it registers itself, then waits for an admin to
         approve it.
       </p>
+      <div class="rounded-md bg-slate-50 px-3 py-2 text-left text-xs text-slate-600">
+        {% if groups %}
+          <p>CILogon reported these groups for you; none is
+            <code class="font-mono">{{ admin_group }}</code>:</p>
+          <ul class="mt-1 list-disc pl-5 font-mono">
+            {% for g in groups %}<li>{{ g }}</li>{% endfor %}
+          </ul>
+        {% else %}
+          <p>CILogon reported no group memberships (<code class="font-mono">isMemberOf</code>)
+            for you. If you were just added to the admin group, log out and in again;
+            otherwise your groups aren't being released to this portal.</p>
+        {% endif %}
+      </div>
       <p class="text-sm text-slate-600">
         Contact: <span class="font-medium text-slate-900">{{ admin_contact }}</span>
       </p>

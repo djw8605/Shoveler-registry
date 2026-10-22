@@ -116,3 +116,18 @@ def test_logged_out_post_redirects_to_login(client, settings):
         follow_redirects=False,
     )
     assert resp.status_code == 303 and resp.headers["location"] == "/"
+
+
+def test_not_authorized_page_lists_received_groups(client, settings, monkeypatch):
+    _login(monkeypatch, ("CO:members:active", "CO:COU:shoveler-admins:members:active"))
+    page = client.get("/dashboard").text
+    assert "Not authorized" in page
+    assert "CO:COU:shoveler-admins:members:active" in page
+    assert "none is" in page and "shoveler-admins" in page
+
+
+def test_not_authorized_page_says_when_no_groups_arrived(client, settings, monkeypatch):
+    _login(monkeypatch, ())
+    page = client.get("/dashboard").text
+    assert "CILogon reported no group memberships" in page
+

@@ -63,8 +63,23 @@ def _pop_flashes(session) -> list[dict]:
     return msgs
 
 
+def _configure_logging() -> None:
+    """Send the portal's own log lines (``portal.*``) to stderr at INFO.
+
+    uvicorn configures only its own loggers: without this, portal INFO lines
+    are dropped and WARNINGs reach stderr only via Python's last-resort handler.
+    """
+    portal_log = logging.getLogger("portal")
+    if not portal_log.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter("%(levelname)s:  %(name)s: %(message)s"))
+        portal_log.addHandler(handler)
+        portal_log.setLevel(logging.INFO)
+
+
 def create_app(settings: Optional[Settings] = None) -> FastAPI:
     settings = settings or get_settings()
+    _configure_logging()
 
     # Initialise persistent state before serving.
     db.init_db(settings.db_path)
@@ -174,8 +189,14 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
         if not user:
             return RedirectResponse("/", status_code=303)
         if not admin_user(request):
+            # Show the groups CILogon sent, so a membership or claim problem
+            # is visible to the person it affects.
             return render(
-                request, "not_authorized.html", admin_contact=settings.admin_contact
+                request,
+                "not_authorized.html",
+                admin_contact=settings.admin_contact,
+                groups=user.groups,
+                admin_group=settings.admin_group,
             )
         now = datetime.now(timezone.utc)
         hours = settings.metrics_retention_hours
@@ -233,7 +254,11 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
             return RedirectResponse("/", status_code=303)
         if not admin_user(request):
             return render(
-                request, "not_authorized.html", admin_contact=settings.admin_contact
+                request,
+                "not_authorized.html",
+                admin_contact=settings.admin_contact,
+                groups=user.groups,
+                admin_group=settings.admin_group,
             )
         now = datetime.now(timezone.utc)
         retention = settings.metrics_retention_hours
