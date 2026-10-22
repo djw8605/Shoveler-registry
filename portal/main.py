@@ -128,7 +128,12 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     def admin_user(request: Request):
         """The logged-in admin, or None if not logged in / not in ADMIN_GROUP."""
         user = current_user(request.session)
-        if user and authz.is_admin(settings.admin_group, user.groups):
+        if user and authz.is_admin(
+            settings.admin_group,
+            user.groups,
+            admin_subs=settings.admin_subs,
+            sub=user.sub,
+        ):
             return user
         return None
 

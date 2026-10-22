@@ -29,7 +29,7 @@ Charts are uPlot (vendored from npm at build time, plain JS, no CDN).
 | `registration.py` | `/register` logic (`register`): token-less pending registration or an admin-made bearer registration token, RFC 7591 metadata validation, idempotent retry. |
 | `tokens.py` | `/token` logic (`issue_token`): `private_key_jwt` assertion verification + replay check, claim building, registration-token generation/hashing, in-process `RateLimiter`. |
 | `health.py` | `/report` body validation (`parse_report`), the health rules and onset (`assess` → `Health` with `summary`/`advice`/`since`), and the views of reports: chart `series`, `hourly`, `current`, `totals`, `restarts`, and the tracker (`trackers` → `Block`s, bucketed in SQL by `db.report_buckets`; `runs`, `pin_onset`, `describe`). One state vocabulary: `health.LABELS`. |
-| `authz.py` | `is_admin(admin_group, groups)`: the only authorization check. |
+| `authz.py` | `is_admin(admin_group, groups, admin_subs=, sub=)`: the only authorization check (group member or allow-listed sub). |
 | `auth.py` | CILogon OIDC relying-party flow (auth-code + PKCE + nonce), ID-token validation, `isMemberOf` group capture, session helpers. |
 | `main.py` | `create_app(settings)` factory: routes, `SessionMiddleware`, CSRF, the `render()`/`admin_user()`/`refuse()` helpers, machine endpoints (`/token`, `/register`, `/report`). |
 | `expire.py` | Expiry subcommand (idle clients, stale pending registrations, old health reports): `python -m portal.expire`. |
@@ -103,14 +103,15 @@ they construct `Settings(...)` directly (see `tests/conftest.py`).
 - **Browser POSTs are CSRF-protected.** Every form includes the per-session
   `csrf_token`; handlers call `_check_csrf`. Destructive actions also confirm
   via a JS `confirm()` in the template. New POST routes must do the same.
-- **Authorization:** one rule. Only members of `ADMIN_GROUP` (COmanage, via
-  CILogon's `isMemberOf`, captured into the session at login) may use the
-  portal; everyone else gets the not-authorized page. Every browser route
+- **Authorization:** one check, `authz.is_admin`. Admins are members of
+  `ADMIN_GROUP` (COmanage, via CILogon's `isMemberOf`, captured into the
+  session at login) OR CILogon subs listed in `ADMIN_SUBS` (exact match; a
+  stopgap while group claims aren't released, kept in deploy config, not a
+  file). Everyone else gets the not-authorized page. Every browser route
   calls `admin_user()` first (POSTs answer non-admins with `refuse()`).
   Admins can do everything: approve/reject, tokens, disable/re-enable any
   shovelers. A site is only a display label, never a grant. No per-site
-  groups, no owner-only checks, no allow-list file. Group changes take effect
-  on next login.
+  groups, no owner-only checks. Group changes take effect on next login.
 - **Sessions:** cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` whenever
   `PORTAL_BASE_URL` is https.
 - **Config:** add new settings in `config.py` (parse env + default there), then

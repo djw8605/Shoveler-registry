@@ -11,6 +11,7 @@ from helpers import seed_client, seed_pending, seed_token
 from portal import authz, db, tokens
 from portal.auth import UserInfo
 
+ME = "http://cilogon.org/serverA/users/27161"
 ADMIN_GROUPS = ("CO:members:active", "shoveler-admins")  # conftest's ADMIN_GROUP
 OTHER_GROUPS = ("CO:members:active", "shoveler-nebraska")
 
@@ -22,11 +23,20 @@ def _login(monkeypatch, groups):
 
 
 def test_is_admin():
-    assert authz.is_admin("shoveler-admins", ADMIN_GROUPS)
-    assert not authz.is_admin("shoveler-admins", OTHER_GROUPS)
-    assert not authz.is_admin("shoveler-admins", ())
+    def check(group, groups, subs=(), sub="someone"):
+        return authz.is_admin(group, groups, admin_subs=subs, sub=sub)
+
+    assert check("shoveler-admins", ADMIN_GROUPS)
+    assert not check("shoveler-admins", OTHER_GROUPS)
+    assert not check("shoveler-admins", ())
     # An empty admin group admits nobody, even someone with an empty group.
-    assert not authz.is_admin("", ("",))
+    assert not check("", ("",))
+    # Allow-listed subs are admins without any group; matching is exact.
+    assert check("shoveler-admins", (), subs=(ME,), sub=ME)
+    assert not check("shoveler-admins", (), subs=(ME,), sub=ME + "0")
+    assert not check("shoveler-admins", (), subs=(ME,), sub=ME[:-1])
+    assert not check("shoveler-admins", (), subs=("",), sub="")
+    assert not check("shoveler-admins", (), subs=(ME,), sub=None)
 
 
 def test_logged_out_sees_login_page(client):
@@ -130,4 +140,61 @@ def test_not_authorized_page_says_when_no_groups_arrived(client, settings, monke
     _login(monkeypatch, ())
     page = client.get("/dashboard").text
     assert "CILogon reported no group memberships" in page
+
+
+def _login_as(monkeypatch, sub, groups=()):
+    monkeypatch.setattr(
+        main_mod, "current_user", lambda session: UserInfo(sub, "me@unl.edu", "Me", groups)
+    )
+
+
+def test_allow_listed_sub_is_admin_without_groups(settings, monkeypatch):
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+    from portal.main import create_app
+
+    allowed = dataclasses.replace(settings, admin_subs=(ME,))
+    client = TestClient(create_app(allowed), base_url="https://testserver")
+    _login_as(monkeypatch, ME)
+    page = client.get("/dashboard").text
+    assert "Registered shovelers" in page and "Not authorized" not in page
+    # ...and can act as an admin (create a registration token).
+    csrf = re.search(r'name="csrf_token" value="([^"]+)"', page).group(1)
+    resp = client.post("/registration-tokens", data={"site": "nebraska", "csrf_token": csrf})
+    assert 'id="token"' in resp.text
+
+
+def test_sub_not_on_allow_list_is_refused(settings, monkeypatch):
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+    from portal.main import create_app
+
+    allowed = dataclasses.replace(settings, admin_subs=(ME,))
+    client = TestClient(create_app(allowed), base_url="https://testserver")
+    _login_as(monkeypatch, "http://cilogon.org/serverA/users/99999")
+    page = client.get("/dashboard").text
+    assert "Not authorized" in page
+    # The page shows the ID to ask to have allow-listed.
+    assert "http://cilogon.org/serverA/users/99999" in page
+
+
+def test_admin_subs_parsed_from_env(monkeypatch):
+    from portal import config
+
+    for k, v in {
+        "CILOGON_CLIENT_ID": "a", "CILOGON_CLIENT_SECRET": "b", "PORTAL_BASE_URL": "https://x.test",
+        "TOKEN_ISSUER": "https://x.test/", "RESOURCE_SERVER_ID": "r", "ADMIN_GROUP": "g",
+        "ADMIN_SUBS": f" {ME} , ,http://cilogon.org/serverB/users/1 ",
+    }.items():
+        monkeypatch.setenv(k, v)
+    config.get_settings.cache_clear()
+    try:
+        assert config.get_settings().admin_subs == (ME, "http://cilogon.org/serverB/users/1")
+        monkeypatch.delenv("ADMIN_SUBS")
+        config.get_settings.cache_clear()
+        assert config.get_settings().admin_subs == ()
+    finally:
+        config.get_settings.cache_clear()
 

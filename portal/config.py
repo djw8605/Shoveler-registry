@@ -86,10 +86,13 @@ class Settings:
     report_rate_window: int
 
     # --- Authorization ---
-    # Members of this COmanage group (CILogon ``isMemberOf`` claim) are the
-    # only people who can log in: they approve shovelers, mint registration
-    # tokens, and disable/re-enable shovelers.
+    # Members of this COmanage group (CILogon ``isMemberOf`` claim) are admins:
+    # they approve shovelers, mint registration tokens, and disable/re-enable
+    # shovelers. ADMIN_SUBS (below) adds individual admins by CILogon sub.
     admin_group: str
+    # CILogon subs (exact) that are admins regardless of groups: a stopgap
+    # allow-list for when group claims aren't released to this client.
+    admin_subs: tuple[str, ...]
 
     @property
     def redirect_uri(self) -> str:
@@ -151,4 +154,7 @@ def get_settings() -> Settings:
         report_rate_limit=int(os.environ.get("REPORT_RATE_LIMIT", "10")),
         report_rate_window=int(os.environ.get("REPORT_RATE_WINDOW", "60")),
         admin_group=_require("ADMIN_GROUP").strip(),
+        admin_subs=tuple(
+            s.strip() for s in os.environ.get("ADMIN_SUBS", "").split(",") if s.strip()
+        ),
     )

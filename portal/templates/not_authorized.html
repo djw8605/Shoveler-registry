@@ -31,6 +31,10 @@
       <p class="text-xs text-slate-400">
         Signed in as {{ user.email or user.sub }}.
       </p>
+      <p class="break-all text-xs text-slate-400">
+        Your CILogon ID (for the admin allow-list):
+        <code class="font-mono">{{ user.sub }}</code>
+      </p>
     </div>
   {% endcall %}
 </div>

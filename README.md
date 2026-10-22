@@ -91,6 +91,7 @@ See [`.env.example`](./.env.example) for the annotated list. Summary:
 | `IDLE_DAYS` | `30` | Idle-expiry threshold |
 | `ADMIN_CONTACT` | _generic_ | Shown on the not-authorized page |
 | `ADMIN_GROUP` | _required_ | COmanage group whose members may log in and manage shovelers |
+| `ADMIN_SUBS` | _empty_ | Comma-separated CILogon `sub`s that are admins regardless of groups (a stopgap when group claims aren't released) |
 | `TOKEN_RATE_LIMIT` / `TOKEN_RATE_WINDOW` | `30` / `60` | Per-`client_id` `/token` rate limit |
 | `REGISTRATION_TOKEN_TTL_SECONDS` | `259200` | Lifetime of a one-time registration token (72h) |
 | `REGISTER_RATE_LIMIT` / `REGISTER_RATE_WINDOW` | `10` / `60` | Per-client-IP `/register` rate limit |
@@ -123,10 +124,14 @@ CILogon's JWKS, plus `iss`/`aud`/`exp`/`nonce`).
 
 ## Authorization (one admin group)
 
-Only members of the COmanage group named in `ADMIN_GROUP`, delivered by
-CILogon in the `isMemberOf` claim, can use the portal. Anyone else who logs in
-sees a "not authorized" page naming `${ADMIN_CONTACT}`. Site operators don't
-need accounts: they just run shovelers, which register themselves.
+Only admins can use the portal: members of the COmanage group named in
+`ADMIN_GROUP`, delivered by CILogon in the `isMemberOf` claim, plus anyone
+whose CILogon `sub` is listed (exactly) in `ADMIN_SUBS`. The allow-list is a
+stopgap for when the CILogon client doesn't receive group claims; prefer the
+group. Anyone else who logs in sees a "not authorized" page naming
+`${ADMIN_CONTACT}`, the groups CILogon reported for them, and their CILogon
+ID (the value to put in `ADMIN_SUBS`). Site operators don't need accounts:
+they just run shovelers, which register themselves.
 
 Admins see one dashboard with:
 

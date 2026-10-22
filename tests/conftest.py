@@ -40,6 +40,7 @@ def settings(tmp_path) -> Settings:
         report_rate_window=60,
         # Members of this COmanage group are the only users of the portal.
         admin_group="shoveler-admins",
+        admin_subs=(),
     )
 
 
